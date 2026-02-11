@@ -2,7 +2,6 @@ import requests
 from noaa_coops import Station
 import pandas as pd
 import os
-from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 import logging
@@ -13,8 +12,6 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-load_dotenv()
 
 API_KEY = os.environ.get("API_KEY")
 DB_CONNECTION_STRING = os.environ.get("DB_CONNECTION_STRING")
