@@ -136,8 +136,6 @@ def obsData(myTimer: func.TimerRequest) -> None:
         
         logging.info(f"Fetching USGS data from {start_str} to {end_str}...")
         
-        headers = {"User-Agent": "WaterLevelDataCollector/1.0"}
-        
         # Fetch each site individually to avoid errors
         for site_id in USGS_SITES:
             try:
@@ -150,7 +148,7 @@ def obsData(myTimer: func.TimerRequest) -> None:
                     "endDT": end_str
                 }
                 
-                response = requests.get(url, params=params, headers=headers, timeout=30)
+                response = requests.get(url, params=params, timeout=30)
                 response.raise_for_status()
                 
                 data = response.json()
@@ -205,8 +203,9 @@ def obsData(myTimer: func.TimerRequest) -> None:
     
     end_dt = datetime.now(timezone.utc)
 
-    # This will be assigned based on the last datetime in the database, which will be grabbed with an SQL Input Bind
-    start_dt = end_dt - timedelta(minutes=16)
+    # This will be assigned based on the last datetime in the database, which will be grabbed with an SQL Input Binding
+    # Default to past 7 days
+    start_dt = end_dt - timedelta(days=7)
     
     try:
         logging.info("Fetching NOAA data...")
