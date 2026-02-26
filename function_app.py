@@ -14,17 +14,21 @@ import logging
 import azure.functions as func
 import requests
 from noaa_coops import Station
-import pandas as pd
 from datetime import datetime, timedelta, timezone
-import json
 
 app = func.FunctionApp()
 
 @app.timer_trigger(schedule="0 */15 * * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False)
+@app.sql_output(arg_name="observations",
+                command_text="observations",
+                connection_string_setting="SqlConnectionString")
 
-def obsData(myTimer: func.TimerRequest) -> None:
+def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList]) -> None:
     logging.info('Python timer trigger function executed.')
+
+    if myTimer.past_due:
+        logging.warning('Timer trigger is running past due')
 
     NOAA_STATION = "8534720"  # Atlantic City NJ
 
@@ -136,8 +140,6 @@ def obsData(myTimer: func.TimerRequest) -> None:
         
         logging.info(f"Fetching USGS data from {start_str} to {end_str}...")
         
-        headers = {"User-Agent": "WaterLevelDataCollector/1.0"}
-        
         # Fetch each site individually to avoid errors
         for site_id in USGS_SITES:
             try:
@@ -150,7 +152,7 @@ def obsData(myTimer: func.TimerRequest) -> None:
                     "endDT": end_str
                 }
                 
-                response = requests.get(url, params=params, headers=headers, timeout=30)
+                response = requests.get(url, params=params, timeout=30)
                 response.raise_for_status()
                 
                 data = response.json()
@@ -205,8 +207,9 @@ def obsData(myTimer: func.TimerRequest) -> None:
     
     end_dt = datetime.now(timezone.utc)
 
-    # This will be assigned based on the last datetime in the database, which will be grabbed with an SQL Input Bind
-    start_dt = end_dt - timedelta(minutes=16)
+    # This will be assigned based on the last datetime in the database, which will be grabbed with an SQL Input Binding
+    # Default to past 7 days
+    start_dt = end_dt - timedelta(days=7)
     
     try:
         logging.info("Fetching NOAA data...")
@@ -219,9 +222,15 @@ def obsData(myTimer: func.TimerRequest) -> None:
         all_observations = noaa_obs + usgs_obs
         logging.info(f"Total observations from both sources: {len(all_observations)} records")
         
-        # Log observations for database insertion (can be used with Azure bindings)
+        # Convert observations to SqlRow objects and insert via output binding
         if all_observations:
-            logging.info(f"Ready to insert: {json.dumps(all_observations[:3])}")  # Log first 3 as sample
+            logging.info(f"Inserting {len(all_observations)} observations into database...")
+            rows = func.SqlRowList()
+            for obs in all_observations:
+                row = func.SqlRow.from_dict(obs)
+                rows.append(row)
+            observations.set(rows)
+            logging.info("Observations inserted successfully")
         
     except Exception as e:
         logging.error(f"Error in timer trigger: {e}", exc_info=True)

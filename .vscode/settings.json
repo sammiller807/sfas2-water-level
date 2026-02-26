@@ -1,6 +1,4 @@
 {
-    "python.analysis.autoImportCompletions": false,
-    "python.analysis.typeCheckingMode": "standard",
     "azureFunctions.deploySubpath": ".",
     "azureFunctions.scmDoBuildDuringDeployment": true,
     "azureFunctions.pythonVenv": ".venv",

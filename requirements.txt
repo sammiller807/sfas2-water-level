@@ -3,5 +3,5 @@
 # azure-monitor-opentelemetry
 
 azure-functions
+noaa-coops
 requests
-noaa_coops
