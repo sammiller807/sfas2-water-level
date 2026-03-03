@@ -11,6 +11,7 @@ Azure SQL Schema:
 '''
 
 import logging
+import json
 import azure.functions as func
 import requests
 from noaa_coops import Station
@@ -234,3 +235,32 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList])
         
     except Exception as e:
         logging.error(f"Error in timer trigger: {e}", exc_info=True)
+
+
+@app.http(route="stations", methods=["GET"])
+@app.sql_input(arg_name="sql_rows",
+               command_text="SELECT DISTINCT station_id FROM observations ORDER BY station_id",
+               connection_string_setting="SqlConnectionString")
+def getStations(req: func.HttpRequest, sql_rows: func.SqlRowList) -> func.HttpResponse:
+    """HTTP trigger function to get list of unique stations from the database."""
+    logging.info('getStations HTTP trigger function called.')
+    
+    try:
+        stations = []
+        for row in sql_rows:
+            stations.append({
+                "station_id": row["station_id"]
+            })
+        
+        return func.HttpResponse(
+            json.dumps(stations),
+            status_code=200,
+            mimetype="application/json"
+        )
+    except Exception as e:
+        logging.error(f"Error retrieving stations: {e}")
+        return func.HttpResponse(
+            json.dumps({"error": "Failed to retrieve stations"}),
+            status_code=500,
+            mimetype="application/json"
+        )
