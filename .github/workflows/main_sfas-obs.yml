@@ -12,7 +12,7 @@ on:
 
 env:
   AZURE_FUNCTIONAPP_PACKAGE_PATH: '.' # set this to the path to your web app project, defaults to the repository root
-  PYTHON_VERSION: '3.11' # set this to the python version to use (supports 3.6, 3.7, 3.8)
+  PYTHON_VERSION: '3.12' # set this to the python version to use (supports 3.6, 3.7, 3.8)
 
 jobs:
   build:
@@ -72,4 +72,4 @@ jobs:
           app-name: 'sfas-obs'
           slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_51D9804021B8467093B2D168654AA7F6 }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_F4412E3D0D4F472F999BABEE5EFFBCC4 }}
