@@ -5,3 +5,5 @@
 azure-functions
 noaa-coops
 requests
+pandas
+zeep
