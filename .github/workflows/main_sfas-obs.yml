@@ -72,5 +72,4 @@ jobs:
           app-name: 'sfas-obs'
           slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_DA541B3FF61C4FA58E327974247CCF28 }}
-          scm-do-build-during-deployment: true
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_705A2F36650A40BCBB06357FE26B16EF }}
