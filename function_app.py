@@ -237,7 +237,7 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList])
         logging.error(f"Error in timer trigger: {e}", exc_info=True)
 
 
-@app.route(route="stations", methods=["GET"])
+@app.route(route="stations", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 @app.sql_input(arg_name="sql_rows",
                command_text="SELECT DISTINCT station_id FROM observations ORDER BY station_id",
                connection_string_setting="SqlConnectionString")
