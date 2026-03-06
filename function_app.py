@@ -82,6 +82,7 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList])
                         begin_date=start_str,
                         end_date=end_str,
                         product=product,
+                        datum="NAVD88",
                     )
                     
                     if df.empty:
