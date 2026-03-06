@@ -135,6 +135,3 @@ All timestamps are treated as UTC and inserted verbatim.
 - Host start errors: confirm Python version and Azure Functions Core Tools installation.
 - SQL connection issues: check firewall/IP rules, connection string syntax.
 - API failures: inspect log output in the Functions host for timeouts or parsing errors.
-
-
-s
