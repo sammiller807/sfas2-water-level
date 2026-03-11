@@ -14,6 +14,7 @@ import logging
 import json
 import azure.functions as func
 import requests
+import time
 from noaa_coops import Station
 from datetime import datetime, timedelta, timezone
 
@@ -24,8 +25,10 @@ app = func.FunctionApp()
 @app.sql_output(arg_name="observations",
                 command_text="observations",
                 connection_string_setting="SqlConnectionString")
-
-def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList]) -> None:
+@app.sql_input(arg_name="last_datetime_row",
+               command_text="SELECT ISNULL(MAX(datetime_utc), DATEADD(DAY, -7, GETUTCDATE())) AS last_dt FROM observations",
+               connection_string_setting="SqlConnectionString")
+def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList], last_datetime_row: func.SqlRowList) -> None:
     logging.info('Python timer trigger function executed.')
 
     if myTimer.past_due:
@@ -83,6 +86,8 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList])
                         end_date=end_str,
                         product=product,
                         datum="NAVD",
+                        units="metric",
+                        time_zone="utc"
                     )
                     
                     if df.empty:
@@ -96,22 +101,33 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList])
                     
                     # Map NOAA products to parameter names
                     param_name_map = {
-                        "water_level": "water_elevation",
+                        "water_level": "tidal_elevation",
                         "water_temperature": "water_temperature",
                         "air_temperature": "air_temperature",
+                    }
+
+                    unit_map = {
+                        "water_level": "meters",
+                        "water_temperature": "celsius",
+                        "air_temperature": "celsius",
                     }
                     
                     # Transform each row to database schema format
                     for _, row in df.iterrows():
                         if row["value"] is None:
                             continue
-                            
+
+                        # Ensure datetime is a plain ISO string (pandas.Timestamp isn't JSON serializable)
+                        dt_val = row["datetime_utc"]
+                        if hasattr(dt_val, "isoformat"):
+                            dt_val = dt_val.isoformat()
+
                         observations.append({
                             "station_id": NOAA_STATION,
                             "parameter": param_name_map[product],
                             "value": float(row["value"]),
-                            "units": "metric",
-                            "datetime_utc": row["datetime_utc"]
+                            "units": unit_map[product],
+                            "datetime_utc": dt_val
                         })
                             
                 except Exception as e:
@@ -136,57 +152,78 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList])
         """
         observations = []
         
-        # Format dates for API (ISO format)
-        start_str = start_dt.isoformat() + "Z"
-        end_str = end_dt.isoformat() + "Z"
+        # Format dates for API (UTC without redundant offset)
+        # USGS doesn't accept the "+00:00Z" suffix produced by isoformat(),
+        # so we manually construct an ISO string with a trailing Z.
+        start_str = start_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_str = end_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         
         logging.info(f"Fetching USGS data from {start_str} to {end_str}...")
         
         # Fetch each site individually to avoid errors
         for site_id in USGS_SITES:
+            # wrap request in a simple retry loop to cope with transient network/HTTP issues
+            url = "https://nwis.waterservices.usgs.gov/nwis/iv"
+            params = {
+                "format": "json",
+                "sites": site_id,
+                "parameterCd": ",".join(PARAM_MAP.keys()),
+                "startDT": start_str,
+                "endDT": end_str
+            }
+
+            attempt = 0
+            data = None
+            while attempt < 3:
+                try:
+                    response = requests.get(url, params=params, timeout=30)
+                    response.raise_for_status()
+                    data = response.json()
+                    break
+                except requests.exceptions.RequestException as e:
+                    attempt += 1
+                    logging.warning(f"Site {site_id}: request attempt {attempt} failed - {e}")
+                    if attempt >= 3:
+                        # give up on this site, move to next
+                        data = None
+                        break
+                    # simple exponential backoff
+                    time.sleep(2 ** attempt)
+
+            # if we didn't get any data after retries, skip this site
+            if data is None:
+                continue
+
+            # parse the returned JSON, handling possible missing fields
             try:
-                url = "https://nwis.waterservices.usgs.gov/nwis/iv"
-                params = {
-                    "format": "json",
-                    "sites": site_id,
-                    "parameterCd": ",".join(PARAM_MAP.keys()),
-                    "startDT": start_str,
-                    "endDT": end_str
-                }
-                
-                response = requests.get(url, params=params, timeout=30)
-                response.raise_for_status()
-                
-                data = response.json()
-                
                 if "value" not in data or "timeSeries" not in data.get("value", {}):
                     logging.debug(f"Site {site_id}: No data available")
                     continue
-                
+
                 time_series_list = data["value"]["timeSeries"]
                 if not time_series_list:
                     logging.debug(f"Site {site_id}: No observations in date range")
                     continue
-                
+
                 site_records = 0
-                
+
                 # Parse each time series (one per parameter) and transform to schema format
                 for ts in time_series_list:
                     param_code = ts["variable"]["variableCode"][0]["value"]
-                    
+
                     if param_code not in PARAM_MAP:
                         continue
-                    
+
                     param = PARAM_MAP[param_code]
                     unit_code = ts["variable"]["unit"]["unitCode"]
-                    
+
                     # Handle case where values might be in different structure
                     values_list = ts.get("values", [{}])[0].get("value", [])
-                    
+
                     for v in values_list:
                         if v.get("value") is None:
                             continue
-                        
+
                         observations.append({
                             "station_id": site_id,
                             "parameter": param,
@@ -194,24 +231,33 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList])
                             "units": unit_code,
                             "datetime_utc": v["dateTime"]
                         })
-                        
+
                         site_records += 1
-                
+
                 logging.info(f"Site {site_id}: {site_records} records retrieved")
-                
-            except requests.exceptions.RequestException as e:
-                logging.warning(f"Site {site_id}: Connection error - {e}")
+
             except (KeyError, ValueError, IndexError) as e:
                 logging.warning(f"Site {site_id}: Parse error - {e}")
+            except requests.exceptions.RequestException as e:
+                # although we handled network errors in the retry loop, keep this
+                logging.warning(f"Site {site_id}: Connection error - {e}")
         
         logging.info(f"USGS observations: {len(observations)} records")
         return observations
     
     end_dt = datetime.now(timezone.utc)
 
-    # This will be assigned based on the last datetime in the database, which will be grabbed with an SQL Input Binding
-    # Default to past 7 days
-    start_dt = end_dt - timedelta(days=7)
+    # Extract the latest datetime from the input binding
+    if last_datetime_row:
+        last_dt_str = last_datetime_row[0]["last_dt"]
+        # Parse the datetime string (Azure SQL returns it as a string)
+        start_dt = datetime.fromisoformat(last_dt_str.replace('Z', '+00:00'))  # Handle UTC format
+    else:
+        start_dt = end_dt - timedelta(days=7)  # Fallback
+
+    # Ensure start_dt is not in the future (edge case)
+    if start_dt >= end_dt:
+        start_dt = end_dt - timedelta(days=7)
     
     try:
         logging.info("Fetching NOAA data...")
@@ -264,4 +310,37 @@ def getStations(req: func.HttpRequest, sql_rows: func.SqlRowList) -> func.HttpRe
             json.dumps({"error": "Failed to retrieve stations"}),
             status_code=500,
             mimetype="application/json"
+        )
+
+
+@app.route(route="station-details", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def getStationDetails(req: func.HttpRequest) -> func.HttpResponse:
+    """HTTP trigger function to proxy the external JS file with station data."""
+    logging.info('getStationDetails HTTP trigger function called.')
+    
+    try:
+        # Fetch the external JS file
+        url = "http://hudson.dl.stevens-tech.edu/sfas/sfas_stations2.js"
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        
+        # Return the JS content with appropriate headers
+        return func.HttpResponse(
+            response.text,
+            status_code=200,
+            mimetype="application/javascript"
+        )
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error fetching station details: {e}")
+        return func.HttpResponse(
+            "/* Error fetching station data */",
+            status_code=500,
+            mimetype="application/javascript"
+        )
+    except Exception as e:
+        logging.error(f"Unexpected error in getStationDetails: {e}")
+        return func.HttpResponse(
+            "/* Internal server error */",
+            status_code=500,
+            mimetype="application/javascript"
         )
