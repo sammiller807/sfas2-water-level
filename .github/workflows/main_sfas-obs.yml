@@ -72,4 +72,4 @@ jobs:
           app-name: 'sfas-obs'
           slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_805A4B18FC234E47B65295079DBB12D8 }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_6AFF7BC4703C49CFB6D00A7CA26C886C }}
