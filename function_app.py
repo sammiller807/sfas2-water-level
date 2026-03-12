@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 app = func.FunctionApp()
 
-@app.timer_trigger(schedule="0 */5 * * * *", arg_name="myTimer", run_on_startup=False,
+@app.timer_trigger(schedule="0 */15 * * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False)
 @app.sql_output(arg_name="observations",
                 command_text="observations",
