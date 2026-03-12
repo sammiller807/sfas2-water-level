@@ -35,7 +35,7 @@ jobs:
           source venv/bin/activate
 
       - name: Install dependencies
-        run: pip install --target="$(workingDirectory)/.python_packages/lib/site-packages" -r requirements.txt
+        run: pip install -r requirements.txt
 
       # Optional: Add step to run tests here
 
@@ -74,4 +74,4 @@ jobs:
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_2612AB71A04E4935A01FDF9DE0D616CC }}
           sku: 'flexconsumption'
-          scm-do-build-during-deployment: true
+          remote-build: true
