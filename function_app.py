@@ -187,6 +187,8 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
                 "parameterCd": ",".join(PARAM_MAP.keys()),
                 "startDT": start_str,
                 "endDT": end_str,
+                # Request metric units (meters / Celsius)
+                "uom": "metric",
             }
 
             attempt = 0
@@ -350,12 +352,12 @@ def getStations(req: func.HttpRequest, sql_rows: func.SqlRowList) -> func.HttpRe
 )
 def getStationData(
     req: func.HttpRequest,
-    station_id: str,
-    start_date: str,
-    end_date: str,
     station_rows: func.SqlRowList
 ) -> func.HttpResponse:
     """HTTP trigger function to fetch observations for a given station and date range."""
+    station_id = req.route_params.get("station_id")
+    start_date = req.route_params.get("start_date")
+    end_date = req.route_params.get("end_date")
     logging.info('getStationData HTTP trigger function called. station_id=%s start_date=%s end_date=%s', station_id, start_date, end_date)
 
     try:
