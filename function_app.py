@@ -87,6 +87,7 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
                         product=product,
                         datum="NAVD",
                         units="metric",
+                        time_zone="gmt",
                     )
                     
                     if df.empty:
