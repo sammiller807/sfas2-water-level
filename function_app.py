@@ -187,8 +187,6 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
                 "parameterCd": ",".join(PARAM_MAP.keys()),
                 "startDT": start_str,
                 "endDT": end_str,
-                # Request metric units (meters / Celsius)
-                "uom": "metric",
             }
 
             attempt = 0
@@ -289,7 +287,7 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
 
     # Ensure start_dt is not in the future (edge case) and not after end_dt
     if start_dt >= end_dt:
-        start_dt = end_dt - timedelta(days=7)
+        start_dt = end_dt - timedelta(minutes=15)
     
     try:
         logging.info("Fetching NOAA data...")
