@@ -87,7 +87,6 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
                         product=product,
                         datum="NAVD",
                         units="metric",
-                        time_zone="utc"
                     )
                     
                     if df.empty:
@@ -151,15 +150,33 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
             List of dicts with schema: {station_id, parameter, value, units, datetime_utc}
         """
         observations = []
-        
+
+        # Normalize and convert USGS values into the units we want (meters / celsius)
+        def _normalize_usgs_value(param_code: str, unit_code: str, value: float) -> tuple[float, str]:
+            """Convert requested USGS units into a consistent metric output."""
+            # Common USGS unit codes we might see
+            if param_code == "72279":
+                # Tidal elevation: prefer meters
+                if unit_code in ("ft", "feet", "foot"):
+                    return value * 0.3048, "meters"
+                if unit_code in ("m", "meters"):
+                    return value, "meters"
+                return value, "meters"
+
+            if param_code in ("00010", "00020"):  # temperature
+                return value, "celsius"
+
+            # Fallback: return the original unit code if we don't know it
+            return value, unit_code
+
         # Format dates for API (UTC without redundant offset)
         # USGS doesn't accept the "+00:00Z" suffix produced by isoformat(),
         # so we manually construct an ISO string with a trailing Z.
         start_str = start_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         end_str = end_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        
+
         logging.info(f"Fetching USGS data from {start_str} to {end_str}...")
-        
+
         # Fetch each site individually to avoid errors
         for site_id in USGS_SITES:
             # wrap request in a simple retry loop to cope with transient network/HTTP issues
@@ -169,7 +186,7 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
                 "sites": site_id,
                 "parameterCd": ",".join(PARAM_MAP.keys()),
                 "startDT": start_str,
-                "endDT": end_str
+                "endDT": end_str,
             }
 
             attempt = 0
@@ -224,11 +241,13 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
                         if v.get("value") is None:
                             continue
 
+                        val, units = _normalize_usgs_value(param_code, unit_code, float(v["value"]))
+
                         observations.append({
                             "station_id": site_id,
                             "parameter": param,
-                            "value": float(v["value"]),
-                            "units": unit_code,
+                            "value": val,
+                            "units": units,
                             "datetime_utc": v["dateTime"]
                         })
 
@@ -241,21 +260,32 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
             except requests.exceptions.RequestException as e:
                 # although we handled network errors in the retry loop, keep this
                 logging.warning(f"Site {site_id}: Connection error - {e}")
-        
+
         logging.info(f"USGS observations: {len(observations)} records")
         return observations
     
     end_dt = datetime.now(timezone.utc)
 
-    # Extract the latest datetime from the input binding
+    def _ensure_utc(dt: datetime) -> datetime:
+        """Ensure a datetime has UTC tzinfo so .astimezone() behaves predictably."""
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    # Extract the latest datetime from the input binding, then advance slightly to avoid overlapping
     if last_datetime_row:
         last_dt_str = last_datetime_row[0]["last_dt"]
         # Parse the datetime string (Azure SQL returns it as a string)
-        start_dt = datetime.fromisoformat(last_dt_str.replace('Z', '+00:00'))  # Handle UTC format
+        last_dt = datetime.fromisoformat(last_dt_str.replace('Z', '+00:00'))  # Handle UTC format
+        last_dt = _ensure_utc(last_dt)
+        # Increment a small amount so we don't refetch the same timestamp (avoids unique key conflicts)
+        start_dt = last_dt + timedelta(milliseconds=1)
     else:
         start_dt = end_dt - timedelta(days=7)  # Fallback
 
-    # Ensure start_dt is not in the future (edge case)
+    # Ensure start_dt is not in the future (edge case) and not after end_dt
     if start_dt >= end_dt:
         start_dt = end_dt - timedelta(days=7)
     
@@ -295,9 +325,7 @@ def getStations(req: func.HttpRequest, sql_rows: func.SqlRowList) -> func.HttpRe
     try:
         stations = []
         for row in sql_rows:
-            stations.append({
-                "station_id": row["station_id"]
-            })
+            stations.append(row["station_id"])
         
         return func.HttpResponse(
             json.dumps(stations),
@@ -308,6 +336,48 @@ def getStations(req: func.HttpRequest, sql_rows: func.SqlRowList) -> func.HttpRe
         logging.error(f"Error retrieving stations: {e}")
         return func.HttpResponse(
             json.dumps({"error": "Failed to retrieve stations"}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+
+@app.route(route="station-data/{station_id}/{start_date}/{end_date}", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+@app.sql_input(
+    arg_name="station_rows",
+    command_text="SELECT station_id, parameter, value, units, datetime_utc FROM observations WHERE station_id = @station_id AND datetime_utc BETWEEN @start_date AND @end_date ORDER BY datetime_utc",
+    connection_string_setting="SqlConnectionString",
+    parameters="@station_id={station_id},@start_date={start_date},@end_date={end_date}"
+)
+def getStationData(
+    req: func.HttpRequest,
+    station_id: str,
+    start_date: str,
+    end_date: str,
+    station_rows: func.SqlRowList
+) -> func.HttpResponse:
+    """HTTP trigger function to fetch observations for a given station and date range."""
+    logging.info('getStationData HTTP trigger function called. station_id=%s start_date=%s end_date=%s', station_id, start_date, end_date)
+
+    try:
+        results = []
+        for row in station_rows:
+            results.append({
+                "station_id": row["station_id"],
+                "parameter": row["parameter"],
+                "value": row["value"],
+                "units": row.get("units"),
+                "datetime_utc": row["datetime_utc"],
+            })
+
+        return func.HttpResponse(
+            json.dumps(results),
+            status_code=200,
+            mimetype="application/json"
+        )
+    except Exception as e:
+        logging.error(f"Error retrieving station data: {e}")
+        return func.HttpResponse(
+            json.dumps({"error": "Failed to retrieve station data"}),
             status_code=500,
             mimetype="application/json"
         )
