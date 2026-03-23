@@ -29,6 +29,8 @@ app = func.FunctionApp()
                command_text="SELECT ISNULL(MAX(datetime_utc), DATEADD(DAY, -7, GETUTCDATE())) AS last_dt FROM observations",
                connection_string_setting="SqlConnectionString")
 def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList], last_datetime_row: func.SqlRowList) -> None:
+    logging.info(f"Last datetime row from database: {last_datetime_row[0]['last_dt']}")
+    
     logging.info('Python timer trigger function executed.')
 
     if myTimer.past_due:
@@ -290,6 +292,8 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
     if start_dt >= end_dt:
         start_dt = end_dt - timedelta(minutes=15)
     
+    logging.info(f"Fetching data from {start_dt} to {end_dt}...")
+
     try:
         logging.info("Fetching NOAA data...")
         noaa_obs = fetch_noaa(start_dt, end_dt)
