@@ -284,7 +284,7 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
         last_dt = datetime.fromisoformat(last_dt_str.replace('Z', '+00:00'))  # Handle UTC format
         last_dt = _ensure_utc(last_dt)
         # Increment a small amount so we don't refetch the same timestamp (avoids unique key conflicts)
-        start_dt = last_dt + timedelta(milliseconds=1)
+        start_dt = last_dt + timedelta(seconds=1)
     else:
         start_dt = end_dt - timedelta(days=7)  # Fallback
 
