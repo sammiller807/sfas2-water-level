@@ -3,6 +3,7 @@ Azure SQL Schema:
     CREATE TABLE observations (
     id INT IDENTITY PRIMARY KEY,
     station_id VARCHAR(10) NOT NULL,
+    title VARCHAR(100) NULL,
     parameter VARCHAR(20) NOT NULL,
     value FLOAT NOT NULL,
     units VARCHAR(10) NULL,
@@ -36,20 +37,21 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
     if myTimer.past_due:
         logging.warning('Timer trigger is running past due')
 
-    NOAA_STATION = "8534720"  # Atlantic City NJ
+    NOAA_STATIONS = {
+        "8534720": "Atlantic City NJ",  # NOAA station id: station title
+    }
 
-    # USGS Station IDs
-    USGS_SITES = [
-        "01408048",  # Watson Creek at Manasquan NJ
-        "01408168",  # Barnegat Bay at Mantoloking NJ
-        "01408750",  # Barnegat Bay at Seaside Heights NJ
-        "01409110",  # Barnegat Bay at Waretown NJ
-        "01409125",  # Barnegat Bay at Barnegat Light NJ
-        "01409146",  # East Thorofare at Ship Bottom NJ
-        "01409335",  # Little Egg Inlet near Tuckerton NJ
-        "01410510",  # Absecon Creek Rte 30 at Absecon NJ
-        "01410560"   # Inside Thorofare Rte 40 Atlantic City NJ
-    ]
+    USGS_SITE_TITLES = {
+        "01408048": "Watson Creek at Manasquan NJ",
+        "01408168": "Barnegat Bay at Mantoloking NJ",
+        "01408750": "Barnegat Bay at Seaside Heights NJ",
+        "01409110": "Barnegat Bay at Waretown NJ",
+        "01409125": "Barnegat Bay at Barnegat Light NJ",
+        "01409146": "East Thorofare at Ship Bottom NJ",
+        "01409335": "Little Egg Inlet near Tuckerton NJ",
+        "01410510": "Absecon Creek Rte 30 at Absecon NJ",
+        "01410560": "Inside Thorofare Rte 40 Atlantic City NJ",
+    }
 
     # USGS Parameter Codes:
     # "72279": "Tidal elevation, NOS-averaged, NAVD88, feet",
@@ -74,66 +76,68 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
         observations = []
         
         try:
-            station = Station(id=NOAA_STATION)
-            
             # Format dates for NOAA API
             start_str = start_dt.strftime("%Y%m%d %H:%M")
             end_str = end_dt.strftime("%Y%m%d %H:%M")
             
-            # Fetch each product and consolidate
-            for product in ["water_level", "water_temperature", "air_temperature"]:
-                try:
-                    df = station.get_data(
-                        begin_date=start_str,
-                        end_date=end_str,
-                        product=product,
-                        datum="NAVD",
-                        units="metric",
-                        time_zone="gmt",
-                    )
-                    
-                    if df.empty:
-                        logging.info(f"NOAA {product}: No data available")
-                        continue
-                    
-                    df = df.reset_index()
-                    df.rename(columns={"t": "datetime_utc", "v": "value"}, inplace=True)
-                    
-                    logging.info(f"NOAA {product}: {len(df)} records retrieved")
-                    
-                    # Map NOAA products to parameter names
-                    param_name_map = {
-                        "water_level": "tidal_elevation",
-                        "water_temperature": "water_temperature",
-                        "air_temperature": "air_temperature",
-                    }
+            # Map NOAA products to parameter names
+            param_name_map = {
+                "water_level": "tidal_elevation",
+                "water_temperature": "water_temperature",
+                "air_temperature": "air_temperature",
+            }
 
-                    unit_map = {
-                        "water_level": "meters",
-                        "water_temperature": "celsius",
-                        "air_temperature": "celsius",
-                    }
-                    
-                    # Transform each row to database schema format
-                    for _, row in df.iterrows():
-                        if row["value"] is None:
+            unit_map = {
+                "water_level": "meters",
+                "water_temperature": "celsius",
+                "air_temperature": "celsius",
+            }
+
+            # Fetch each configured station and each product
+            for station_id, station_title in NOAA_STATIONS.items():
+                station = Station(id=station_id)
+
+                for product in ["water_level", "water_temperature", "air_temperature"]:
+                    try:
+                        df = station.get_data(
+                            begin_date=start_str,
+                            end_date=end_str,
+                            product=product,
+                            datum="NAVD",
+                            units="metric",
+                            time_zone="gmt",
+                        )
+
+                        if df.empty:
+                            logging.info(f"NOAA station {station_id} {product}: No data available")
                             continue
 
-                        # Ensure datetime is a plain ISO string (pandas.Timestamp isn't JSON serializable)
-                        dt_val = row["datetime_utc"]
-                        if hasattr(dt_val, "isoformat"):
-                            dt_val = dt_val.isoformat()
+                        df = df.reset_index()
+                        df.rename(columns={"t": "datetime_utc", "v": "value"}, inplace=True)
 
-                        observations.append({
-                            "station_id": NOAA_STATION,
-                            "parameter": param_name_map[product],
-                            "value": float(row["value"]),
-                            "units": unit_map[product],
-                            "datetime_utc": dt_val
-                        })
-                            
-                except Exception as e:
-                    logging.warning(f"Error fetching NOAA {product}: {e}")
+                        logging.info(f"NOAA station {station_id} {product}: {len(df)} records retrieved")
+
+                        # Transform each row to database schema format
+                        for _, row in df.iterrows():
+                            if row["value"] is None:
+                                continue
+
+                            # Ensure datetime is a plain ISO string (pandas.Timestamp isn't JSON serializable)
+                            dt_val = row["datetime_utc"]
+                            if hasattr(dt_val, "isoformat"):
+                                dt_val = dt_val.isoformat()
+
+                            observations.append({
+                                "station_id": station_id,
+                                "title": station_title,
+                                "parameter": param_name_map[product],
+                                "value": float(row["value"]),
+                                "units": unit_map[product],
+                                "datetime_utc": dt_val
+                            })
+
+                    except Exception as e:
+                        logging.warning(f"Error fetching NOAA station {station_id} {product}: {e}")
             
             logging.info(f"NOAA observations: {len(observations)} records")
             
@@ -181,7 +185,7 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
         logging.info(f"Fetching USGS data from {start_str} to {end_str}...")
 
         # Fetch each site individually to avoid errors
-        for site_id in USGS_SITES:
+        for site_id, site_title in USGS_SITE_TITLES.items():
             # wrap request in a simple retry loop to cope with transient network/HTTP issues
             url = "https://nwis.waterservices.usgs.gov/nwis/iv"
             params = {
@@ -248,6 +252,7 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
 
                         observations.append({
                             "station_id": site_id,
+                            "title": site_title,
                             "parameter": param,
                             "value": val,
                             "units": units,
@@ -321,7 +326,7 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
 
 @app.route(route="stations", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 @app.sql_input(arg_name="sql_rows",
-               command_text="SELECT DISTINCT station_id FROM observations ORDER BY station_id",
+               command_text="SELECT station_id, MAX(title) AS title FROM observations GROUP BY station_id ORDER BY station_id",
                connection_string_setting="SqlConnectionString")
 def getStations(req: func.HttpRequest, sql_rows: func.SqlRowList) -> func.HttpResponse:
     """HTTP trigger function to get list of unique stations from the database."""
@@ -330,7 +335,10 @@ def getStations(req: func.HttpRequest, sql_rows: func.SqlRowList) -> func.HttpRe
     try:
         stations = []
         for row in sql_rows:
-            stations.append(row["station_id"])
+            stations.append({
+                "station_id": row["station_id"],
+                "title": row.get("title")
+            })
         
         return func.HttpResponse(
             json.dumps(stations),
@@ -349,7 +357,7 @@ def getStations(req: func.HttpRequest, sql_rows: func.SqlRowList) -> func.HttpRe
 @app.route(route="station-data/{station_id}/{start_date}/{end_date}", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 @app.sql_input(
     arg_name="station_rows",
-    command_text="SELECT station_id, parameter, value, units, datetime_utc FROM observations WHERE station_id = @station_id AND datetime_utc BETWEEN @start_date AND @end_date ORDER BY datetime_utc",
+    command_text="SELECT station_id, title, parameter, value, units, datetime_utc FROM observations WHERE station_id = @station_id AND datetime_utc BETWEEN @start_date AND @end_date ORDER BY datetime_utc",
     connection_string_setting="SqlConnectionString",
     parameters="@station_id={station_id},@start_date={start_date},@end_date={end_date}"
 )
@@ -368,6 +376,7 @@ def getStationData(
         for row in station_rows:
             results.append({
                 "station_id": row["station_id"],
+                "title": row.get("title"),
                 "parameter": row["parameter"],
                 "value": row["value"],
                 "units": row.get("units"),

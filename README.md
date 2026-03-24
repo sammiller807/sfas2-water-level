@@ -10,7 +10,7 @@ This repository contains an Azure Functions Python app that retrieves tidal elev
 - NOAA COOPS data (water level, water/air temperature) from Atlantic City (8534720)
 - USGS NWIS Instantaneous Values for nine New Jersey sites
 - Azure SQL output binding to bulk insert observations
-- HTTP GET `/stations` endpoint returns unique station IDs in JSON
+- HTTP GET `/stations` endpoint returns station IDs with station titles in JSON
 - Robust error handling and detailed logging
 
 ---
@@ -52,6 +52,12 @@ Create or update `local.settings.json` with your connection string:
 
 > Note: The same `SqlConnectionString` setting is used by both the timer and HTTP functions.
 
+If you already have the table created, run this migration:
+
+```sql
+ALTER TABLE observations ADD title VARCHAR(100) NULL;
+```
+
 ### Database schema
 
 Execute the following SQL in your Azure SQL instance (see `function_app.py` header comments for reference):
@@ -60,6 +66,7 @@ Execute the following SQL in your Azure SQL instance (see `function_app.py` head
 CREATE TABLE observations (
     id INT IDENTITY PRIMARY KEY,
     station_id VARCHAR(10) NOT NULL,
+    title VARCHAR(100) NULL,
     parameter VARCHAR(20) NOT NULL,
     value FLOAT NOT NULL,
     units VARCHAR(10) NULL,
@@ -91,9 +98,9 @@ Response example:
 
 ```json
 [
-  {"station_id": "01408048"},
-  {"station_id": "01408168"},
-  {"station_id": "8534720"}
+  {"station_id": "01408048", "title": "Watson Creek at Manasquan NJ"},
+  {"station_id": "01408168", "title": "Barnegat Bay at Mantoloking NJ"},
+  {"station_id": "8534720", "title": "Atlantic City NJ"}
 ]
 ```
 
