@@ -13,6 +13,7 @@ Azure SQL Schema:
 
 import logging
 import json
+import math
 import azure.functions as func
 import requests
 import time
@@ -23,13 +24,13 @@ app = func.FunctionApp()
 
 @app.timer_trigger(schedule="0 */15 * * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False)
-@app.sql_output(arg_name="observations",
+@app.sql_output(arg_name="output_rows",
                 command_text="observations",
                 connection_string_setting="SqlConnectionString")
 @app.sql_input(arg_name="last_datetime_row",
                command_text="SELECT ISNULL(MAX(datetime_utc), DATEADD(DAY, -7, GETUTCDATE())) AS last_dt FROM observations",
                connection_string_setting="SqlConnectionString")
-def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList], last_datetime_row: func.SqlRowList) -> None:
+def obsData(myTimer: func.TimerRequest, output_rows: func.Out[func.SqlRowList], last_datetime_row: func.SqlRowList) -> None:
     logging.info(f"Last datetime row from database: {last_datetime_row[0]['last_dt']}")
     
     logging.info('Python timer trigger function executed.')
@@ -41,7 +42,7 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
         "8534720": "Atlantic City NJ",  # NOAA station id: station title
     }
 
-    USGS_SITE_TITLES = {
+    USGS_STATIONS = {
         "01408048": "Watson Creek at Manasquan NJ",
         "01408168": "Barnegat Bay at Mantoloking NJ",
         "01408750": "Barnegat Bay at Seaside Heights NJ",
@@ -63,6 +64,52 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
         "00010": "water_temperature",
     }
 
+    def _coerce_valid_float(raw_value) -> float | None:
+        """Convert provider values into finite floats, skipping missing sentinels."""
+        if raw_value is None:
+            return None
+
+        if isinstance(raw_value, str):
+            stripped_value = raw_value.strip()
+            if not stripped_value or stripped_value in {"-999999", "Eqp"}:
+                return None
+            raw_value = stripped_value
+
+        try:
+            numeric_value = float(raw_value)
+        except (TypeError, ValueError):
+            return None
+
+        if math.isnan(numeric_value) or math.isinf(numeric_value):
+            return None
+
+        return numeric_value
+
+    def _parse_last_datetime(raw_value) -> datetime | None:
+        """Parse Azure SQL datetime values returned as either strings or datetime objects."""
+        if raw_value is None:
+            return None
+
+        if isinstance(raw_value, datetime):
+            return raw_value
+
+        normalized_value = str(raw_value).strip()
+        if normalized_value.endswith("Z"):
+            normalized_value = normalized_value[:-1] + "+00:00"
+
+        try:
+            return datetime.fromisoformat(normalized_value)
+        except ValueError:
+            pass
+
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(normalized_value, fmt)
+            except ValueError:
+                continue
+
+        raise ValueError(f"Unsupported datetime format from database: {raw_value}")
+
     def fetch_noaa(start_dt: datetime, end_dt: datetime) -> list:
         """Fetch NOAA data from NOAA COOPS API for all products.
         
@@ -73,7 +120,7 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
         Returns:
             List of dicts with schema: {station_id, parameter, value, units, datetime_utc}
         """
-        observations = []
+        noaa_observations = []
         
         try:
             # Format dates for NOAA API
@@ -99,11 +146,20 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
 
                 for product in ["water_level", "water_temperature", "air_temperature"]:
                     try:
-                        df = station.get_data(
+                        if(product == "water_level"):
+                            df = station.get_data(
                             begin_date=start_str,
                             end_date=end_str,
                             product=product,
                             datum="NAVD",
+                            units="metric",
+                            time_zone="gmt",
+                        )
+                        else:
+                            df = station.get_data(
+                            begin_date=start_str,
+                            end_date=end_str,
+                            product=product,
                             units="metric",
                             time_zone="gmt",
                         )
@@ -119,7 +175,8 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
 
                         # Transform each row to database schema format
                         for _, row in df.iterrows():
-                            if row["value"] is None:
+                            numeric_value = _coerce_valid_float(row["value"])
+                            if numeric_value is None:
                                 continue
 
                             # Ensure datetime is a plain ISO string (pandas.Timestamp isn't JSON serializable)
@@ -127,11 +184,11 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
                             if hasattr(dt_val, "isoformat"):
                                 dt_val = dt_val.isoformat()
 
-                            observations.append({
+                            noaa_observations.append({
                                 "station_id": station_id,
                                 "title": station_title,
                                 "parameter": param_name_map[product],
-                                "value": float(row["value"]),
+                                "value": numeric_value,
                                 "units": unit_map[product],
                                 "datetime_utc": dt_val
                             })
@@ -139,12 +196,12 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
                     except Exception as e:
                         logging.warning(f"Error fetching NOAA station {station_id} {product}: {e}")
             
-            logging.info(f"NOAA observations: {len(observations)} records")
+            logging.info(f"NOAA observations: {len(noaa_observations)} records")
             
         except Exception as e:
             logging.error(f"Error fetching NOAA data: {e}")
         
-        return observations
+        return noaa_observations
     
     def fetch_usgs(start_dt: datetime, end_dt: datetime) -> list:
         """Fetch USGS data using Instantaneous Values API (NWIS IV).
@@ -156,7 +213,7 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
         Returns:
             List of dicts with schema: {station_id, parameter, value, units, datetime_utc}
         """
-        observations = []
+        usgs_observations = []
 
         # Normalize and convert USGS values into the units we want (meters / celsius)
         def _normalize_usgs_value(param_code: str, unit_code: str, value: float) -> tuple[float, str]:
@@ -185,7 +242,7 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
         logging.info(f"Fetching USGS data from {start_str} to {end_str}...")
 
         # Fetch each site individually to avoid errors
-        for site_id, site_title in USGS_SITE_TITLES.items():
+        for site_id, site_title in USGS_STATIONS.items():
             # wrap request in a simple retry loop to cope with transient network/HTTP issues
             url = "https://nwis.waterservices.usgs.gov/nwis/iv"
             params = {
@@ -245,18 +302,32 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
                     values_list = ts.get("values", [{}])[0].get("value", [])
 
                     for v in values_list:
-                        if v.get("value") is None:
+                        numeric_value = _coerce_valid_float(v.get("value"))
+                        if numeric_value is None:
                             continue
 
-                        val, units = _normalize_usgs_value(param_code, unit_code, float(v["value"]))
+                        val, units = _normalize_usgs_value(param_code, unit_code, numeric_value)
 
-                        observations.append({
+                        # Normalize USGS datetime to UTC. USGS returns offset-aware strings
+                        # like "2026-03-25T04:07:00.000-04:00"; storing them raw causes
+                        # SQL Server datetime2 to strip the offset and keep the local time,
+                        # leading to duplicate-key errors on subsequent fetches.
+                        raw_dt = v["dateTime"]
+                        try:
+                            parsed_dt = datetime.fromisoformat(raw_dt)
+                            if parsed_dt.tzinfo is not None:
+                                parsed_dt = parsed_dt.astimezone(timezone.utc)
+                            dt_str = parsed_dt.strftime("%Y-%m-%dT%H:%M:%S")
+                        except ValueError:
+                            dt_str = raw_dt
+
+                        usgs_observations.append({
                             "station_id": site_id,
                             "title": site_title,
                             "parameter": param,
                             "value": val,
                             "units": units,
-                            "datetime_utc": v["dateTime"]
+                            "datetime_utc": dt_str
                         })
 
                         site_records += 1
@@ -269,8 +340,8 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
                 # although we handled network errors in the retry loop, keep this
                 logging.warning(f"Site {site_id}: Connection error - {e}")
 
-        logging.info(f"USGS observations: {len(observations)} records")
-        return observations
+        logging.info(f"USGS observations: {len(usgs_observations)} records")
+        return usgs_observations
     
     end_dt = datetime.now(timezone.utc)
 
@@ -285,8 +356,7 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
     # Extract the latest datetime from the input binding, then advance slightly to avoid overlapping
     if last_datetime_row:
         last_dt_str = last_datetime_row[0]["last_dt"]
-        # Parse the datetime string (Azure SQL returns it as a string)
-        last_dt = datetime.fromisoformat(last_dt_str.replace('Z', '+00:00'))  # Handle UTC format
+        last_dt = _parse_last_datetime(last_dt_str)
         last_dt = _ensure_utc(last_dt)
         # Increment a small amount so we don't refetch the same timestamp (avoids unique key conflicts)
         start_dt = last_dt + timedelta(minutes=1)
@@ -317,7 +387,7 @@ def obsData(myTimer: func.TimerRequest, observations: func.Out[func.SqlRowList],
             for obs in all_observations:
                 row = func.SqlRow.from_dict(obs)
                 rows.append(row)
-            observations.set(rows)
+            output_rows.set(rows)
             logging.info("Observations inserted successfully")
         
     except Exception as e:
