@@ -427,7 +427,7 @@ def getStations(req: func.HttpRequest, sql_rows: func.SqlRowList) -> func.HttpRe
 @app.route(route="station-data/{station_id}/{start_date}/{end_date}", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 @app.sql_input(
     arg_name="station_rows",
-    command_text="SELECT station_id, title, parameter, value, units, datetime_utc FROM observations WHERE station_id = @station_id AND datetime_utc BETWEEN @start_date AND @end_date ORDER BY datetime_utc",
+    command_text="SELECT station_id, title, parameter, value, units, datetime_utc FROM observations WHERE station_id = @station_id AND TRY_CONVERT(datetime2, @start_date, 23) IS NOT NULL AND TRY_CONVERT(datetime2, @end_date, 23) IS NOT NULL AND datetime_utc >= TRY_CONVERT(datetime2, @start_date, 23) AND datetime_utc < DATEADD(DAY, 1, TRY_CONVERT(datetime2, @end_date, 23)) ORDER BY datetime_utc",
     connection_string_setting="SqlConnectionString",
     parameters="@station_id={station_id},@start_date={start_date},@end_date={end_date}"
 )
@@ -442,6 +442,17 @@ def getStationData(
     logging.info('getStationData HTTP trigger function called. station_id=%s start_date=%s end_date=%s', station_id, start_date, end_date)
 
     try:
+        # Accept only date-only route params in yyyy-MM-dd format.
+        parsed_start = datetime.strptime(start_date, "%Y-%m-%d")
+        parsed_end = datetime.strptime(end_date, "%Y-%m-%d")
+
+        if parsed_end < parsed_start:
+            return func.HttpResponse(
+                json.dumps({"error": "end_date must be on or after start_date"}),
+                status_code=400,
+                mimetype="application/json"
+            )
+
         results = []
         for row in station_rows:
             results.append({
@@ -456,6 +467,12 @@ def getStationData(
         return func.HttpResponse(
             json.dumps(results),
             status_code=200,
+            mimetype="application/json"
+        )
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({"error": "start_date and end_date must be in yyyy-MM-dd format"}),
+            status_code=400,
             mimetype="application/json"
         )
     except Exception as e:
