@@ -1,433 +1,283 @@
-'''
-Azure SQL Schema:
-    CREATE TABLE observations (
-    id INT IDENTITY PRIMARY KEY,
-    station_id VARCHAR(10) NOT NULL,
-    title VARCHAR(100) NULL,
-    parameter VARCHAR(20) NOT NULL,
-    value FLOAT NOT NULL,
-    units VARCHAR(10) NULL,
-    datetime_utc DATETIME2 NOT NULL
-    );
-'''
-
 import logging
 import json
-import math
 import azure.functions as func
 import requests
-import time
+import pandas as pd
 from noaa_coops import Station
 from datetime import datetime, timedelta, timezone
+from dataretrieval import waterdata
+from dotenv import load_dotenv
 
 app = func.FunctionApp()
+load_dotenv()
 
-@app.timer_trigger(schedule="0 */15 * * * *", arg_name="myTimer", run_on_startup=False,
-              use_monitor=False)
-@app.sql_output(arg_name="output_rows",
-                command_text="observations",
-                connection_string_setting="SqlConnectionString")
-@app.sql_input(arg_name="last_datetime_row",
-               command_text="SELECT ISNULL(MAX(datetime_utc), DATEADD(DAY, -7, GETUTCDATE())) AS last_dt FROM observations",
-               connection_string_setting="SqlConnectionString")
-def obsData(myTimer: func.TimerRequest, output_rows: func.Out[func.SqlRowList], last_datetime_row: func.SqlRowList) -> None:
-    logging.info(f"Last datetime row from database: {last_datetime_row[0]['last_dt']}")
-    
-    logging.info('Python timer trigger function executed.')
+@app.timer_trigger(schedule="0 */15 * * * *", arg_name="myTimer", run_on_startup=True, use_monitor=False)
+@app.sql_input(arg_name="station_list", command_text="SELECT sid, agency, agency_sid FROM ext_stations", connection_string_setting="SqlConnectionString")
+@app.sql_input(arg_name="latest_data_list", command_text="SELECT sid, param, dt FROM ext_latest_data", connection_string_setting="SqlConnectionString")
+@app.sql_output(arg_name="output_list", command_text="ext_observations", connection_string_setting="SqlConnectionString")
+@app.sql_output(arg_name="output_latest_data_list", command_text="ext_latest_data", connection_string_setting="SqlConnectionString")
+def obsData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_data_list: func.SqlRowList, output_list: func.Out[func.SqlRowList], output_latest_data_list: func.Out[func.SqlRowList]) -> None:
+    logging.info('Timer trigger function executed.')
 
     if myTimer.past_due:
         logging.warning('Timer trigger is running past due')
-
-    NOAA_STATIONS = {
-        "8534720": "Atlantic City NJ",  # NOAA station id: station title
-    }
-
-    USGS_STATIONS = {
-        "01408048": "Watson Creek at Manasquan NJ",
-        "01408168": "Barnegat Bay at Mantoloking NJ",
-        "01408750": "Barnegat Bay at Seaside Heights NJ",
-        "01409110": "Barnegat Bay at Waretown NJ",
-        "01409125": "Barnegat Bay at Barnegat Light NJ",
-        "01409146": "East Thorofare at Ship Bottom NJ",
-        "01409335": "Little Egg Inlet near Tuckerton NJ",
-        "01410510": "Absecon Creek Rte 30 at Absecon NJ",
-        "01410560": "Inside Thorofare Rte 40 Atlantic City NJ",
-    }
 
     # USGS Parameter Codes:
     # "72279": "Tidal elevation, NOS-averaged, NAVD88, feet",
     # "00010": "Temperature, water, degrees Celsius",
     # "00020": "Temperature, air, degrees Celsius",
     # "00065": "Gage height, feet"
-    PARAM_MAP = {
-        "72279": "tidal_elevation",
-        "00010": "water_temperature",
-    }
+    USGS_PARAM_CODES = [
+        "72279"
+    ]
 
-    def _coerce_valid_float(raw_value) -> float | None:
-        """Convert provider values into finite floats, skipping missing sentinels."""
-        if raw_value is None:
-            return None
+    # NOAA Products:
+    # water_level: Preliminary or verified 6-minute interval water levels, depending on data availability.
+    # air_temperature: Air temperature as measured at the station.
+    # water_temperature: Water temperature as measured at the station.
+    NOS_PRODUCTS = [
+        "water_level"
+    ]
 
-        if isinstance(raw_value, str):
-            stripped_value = raw_value.strip()
-            if not stripped_value or stripped_value in {"-999999", "Eqp"}:
-                return None
-            raw_value = stripped_value
+    #NOTE: For one transaction, all observation data will be put into this one array
+    all_observations = []
 
-        try:
-            numeric_value = float(raw_value)
-        except (TypeError, ValueError):
-            return None
+    #NOTE: Store the updated parameters/products in this list -> will be used to update the database
+    update_latest_data = []
 
-        if math.isnan(numeric_value) or math.isinf(numeric_value):
-            return None
+    # DEFAULT START AND END DATES
+    END_DATE = datetime.now(timezone.utc)
+    START_DATE = END_DATE - timedelta(days=7)
 
-        return numeric_value
-
-    def _parse_last_datetime(raw_value) -> datetime | None:
-        """Parse Azure SQL datetime values returned as either strings or datetime objects."""
-        if raw_value is None:
-            return None
-
-        if isinstance(raw_value, datetime):
-            return raw_value
-
-        normalized_value = str(raw_value).strip()
-        if normalized_value.endswith("Z"):
-            normalized_value = normalized_value[:-1] + "+00:00"
-
-        try:
-            return datetime.fromisoformat(normalized_value)
-        except ValueError:
-            pass
-
-        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
-            try:
-                return datetime.strptime(normalized_value, fmt)
-            except ValueError:
-                continue
-
-        raise ValueError(f"Unsupported datetime format from database: {raw_value}")
-
-    def fetch_noaa(start_dt: datetime, end_dt: datetime) -> list:
+    def fetch_noaa(station: dict[str, str]) -> None:
         """Fetch NOAA data from NOAA COOPS API for all products.
+
+        https://api.tidesandcurrents.noaa.gov/api/prod/
         
         Args:
-            start_dt: Start datetime
-            end_dt: End datetime
-            
-        Returns:
-            List of dicts with schema: {station_id, parameter, value, units, datetime_utc}
+            station: dictionary of station data. Expects keys: sid, agency, agency_sid
+            end_dt: The current datetime. Should be UTC
         """
-        noaa_observations = []
+
+        station_obj = Station(station["agency_sid"])
+
+        nos_observations = []
         
-        try:
-            # Format dates for NOAA API
-            start_str = start_dt.strftime("%Y%m%d %H:%M")
-            end_str = end_dt.strftime("%Y%m%d %H:%M")
-            
-            # Map NOAA products to parameter names
-            param_name_map = {
-                "water_level": "tidal_elevation",
-                "water_temperature": "water_temperature",
-                "air_temperature": "air_temperature",
-            }
+        # Format dates for NOAA API
+        # All dates can be formatted as follows:
+        # yyyyMMdd, yyyyMMdd HH:mm, MM/dd/yyyy, or MM/dd/yyyy HH:mm
 
-            unit_map = {
-                "water_level": "meters",
-                "water_temperature": "celsius",
-                "air_temperature": "celsius",
-            }
+        # Python datetime info can be found here: https://docs.python.org/3/library/datetime.html
+        # "%Y%m%d %H:%M" == yyyyMMdd HH:mm
+        end_str = END_DATE.strftime("%Y%m%d %H:%M")
+        start_str = START_DATE.strftime("%Y%m%d %H:%M")
 
-            # Fetch each configured station and each product
-            for station_id, station_title in NOAA_STATIONS.items():
-                station = Station(id=station_id)
+        # Lookup dict for latest_data
+        lookup = {}
 
-                for product in ["water_level", "water_temperature", "air_temperature"]:
-                    try:
-                        if(product == "water_level"):
-                            df = station.get_data(
-                            begin_date=start_str,
-                            end_date=end_str,
-                            product=product,
-                            datum="NAVD",
-                            units="metric",
-                            time_zone="gmt",
-                        )
-                        else:
-                            df = station.get_data(
-                            begin_date=start_str,
-                            end_date=end_str,
-                            product=product,
-                            units="metric",
-                            time_zone="gmt",
-                        )
+        # Checks if there is data stored in the ext_latest_data table. If there is, create a lookup dict based on the parameter, and then change the start string based on the date.
+        if latest_data_list:
+            nos_latest_data = []
 
-                        if df.empty:
-                            logging.info(f"NOAA station {station_id} {product}: No data available")
-                            continue
-
-                        df = df.reset_index()
-                        df.rename(columns={"t": "datetime_utc", "v": "value"}, inplace=True)
-
-                        logging.info(f"NOAA station {station_id} {product}: {len(df)} records retrieved")
-
-                        # Transform each row to database schema format
-                        for _, row in df.iterrows():
-                            numeric_value = _coerce_valid_float(row["value"])
-                            if numeric_value is None:
-                                continue
-
-                            # Ensure datetime is a plain ISO string (pandas.Timestamp isn't JSON serializable)
-                            dt_val = row["datetime_utc"]
-                            if hasattr(dt_val, "isoformat"):
-                                dt_val = dt_val.isoformat()
-
-                            noaa_observations.append({
-                                "station_id": station_id,
-                                "title": station_title,
-                                "parameter": param_name_map[product],
-                                "value": numeric_value,
-                                "units": unit_map[product],
-                                "datetime_utc": dt_val
-                            })
-
-                    except Exception as e:
-                        logging.warning(f"Error fetching NOAA station {station_id} {product}: {e}")
-            
-            logging.info(f"NOAA observations: {len(noaa_observations)} records")
-            
-        except Exception as e:
-            logging.error(f"Error fetching NOAA data: {e}")
+            for latest_data in latest_data_list:
+                if(station["sid"] == latest_data["sid"]):
+                    nos_latest_data.append(latest_data)
         
-        return noaa_observations
+            lookup = {latest_data["param"]: latest_data for latest_data in nos_latest_data}
+
+        for product in NOS_PRODUCTS:
+            if lookup and product in lookup:
+                #NOTE: If product is in lookup, this will change start str to the last saved date
+                start_str = lookup[product]["dt"].strftime("%Y%m%d %H:%M")
+            else:
+                start_str = START_DATE.strftime("%Y%m%d %H:%M")
+            
+            try:
+                if(product == "water_level"):
+                    df = station_obj.get_data(
+                    begin_date=start_str,
+                    end_date=end_str,
+                    product=product,
+                    datum="NAVD",
+                    units="metric",
+                    time_zone="gmt",
+                )
+                else:
+                    df = station_obj.get_data(
+                    begin_date=start_str,
+                    end_date=end_str,
+                    product=product,
+                    units="metric",
+                    time_zone="gmt",
+                )
+
+                if df.empty:
+                    logging.info(f"NOAA station '{station["sid"]}' {product}: No data available")
+                    continue
+
+                logging.info(f"NOAA station {station["sid"]} {product}: {len(df)} records retrieved")
+
+                # Reset the index (because the time column is the index for whatever reason)
+                df.reset_index(inplace=True)
+
+                df["t"] = pd.to_datetime(df["t"], utc=True)
+
+                #Iterate over the dataframe and append them to the observations
+                # NOAA API Response Help: https://api.tidesandcurrents.noaa.gov/api/prod/responseHelp.html
+                for row in df.itertuples():
+                    nos_observations.append({
+                        "sid": station["sid"],
+                        "param": product,
+                        "dt": row.t,
+                        "value": row.v,
+                        })
+                
+                #For the last row, set the ext_latest_data for the product -- only do this at the end of the function, so save this somewhere
+                last_row = df.iloc[-1]
+                update_latest_data.append({
+                    "sid": station["sid"],
+                    "param": product,
+                    "dt": last_row.t,
+                    "value": last_row.v,
+                    "dt_last_upd": END_DATE.isoformat()
+                })
+                
+            except Exception as e:
+                logging.warning(f"Error fetching NOAA station {station["sid"]} {product}: {e}")
+            
+        logging.info(f"NOAA observations: {len(nos_observations)} records")
+        all_observations.extend(nos_observations)
     
-    def fetch_usgs(start_dt: datetime, end_dt: datetime) -> list:
+    def fetch_usgs(station: dict[str, str]) -> None:
         """Fetch USGS data using Instantaneous Values API (NWIS IV).
         
         Args:
-            start_dt: Start datetime
-            end_dt: End datetime
-            
-        Returns:
-            List of dicts with schema: {station_id, parameter, value, units, datetime_utc}
+            station: dictionary of station data. Expects keys: sid, agency, agency_sid
         """
+
         usgs_observations = []
 
-        # Normalize and convert USGS values into the units we want (meters / celsius)
-        def _normalize_usgs_value(param_code: str, unit_code: str, value: float) -> tuple[float, str]:
-            """Convert requested USGS units into a consistent metric output."""
-            # Common USGS unit codes we might see
-            if param_code == "72279":
-                # Tidal elevation: prefer meters
-                if unit_code in ("ft", "feet", "foot"):
-                    return value * 0.3048, "meters"
-                if unit_code in ("m", "meters"):
-                    return value, "meters"
-                return value, "meters"
+        end_str = END_DATE.isoformat()
+        start_str = START_DATE.isoformat()
 
-            if param_code in ("00010", "00020"):  # temperature
-                return value, "celsius"
+        # Lookup dict for latest_data
+        lookup = {}
 
-            # Fallback: return the original unit code if we don't know it
-            return value, unit_code
+        # Checks if there is data stored in the ext_latest_data table. If there is, create a lookup dict based on the parameter, and then change the start string based on the date.
+        if latest_data_list:
+            usgs_latest_data = []
 
-        # Format dates for API (UTC without redundant offset)
-        # USGS doesn't accept the "+00:00Z" suffix produced by isoformat(),
-        # so we manually construct an ISO string with a trailing Z.
-        start_str = start_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        end_str = end_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            for latest_data in latest_data_list:
+                if(station["sid"] == latest_data["sid"]):
+                    usgs_latest_data.append(latest_data)
+        
+            lookup = {latest_data["param"]: latest_data for latest_data in usgs_latest_data}
 
-        logging.info(f"Fetching USGS data from {start_str} to {end_str}...")
+        for param in USGS_PARAM_CODES:
+            if lookup and param in lookup:
+                #NOTE: If product is in look, this will change start str to the last saved date
+                start_str = lookup[param]["dt"].isoformat()
+            else:
+                start_str = START_DATE.isoformat()
 
-        # Fetch each site individually to avoid errors
-        for site_id, site_title in USGS_STATIONS.items():
-            # wrap request in a simple retry loop to cope with transient network/HTTP issues
-            url = "https://nwis.waterservices.usgs.gov/nwis/iv"
-            params = {
-                "format": "json",
-                "sites": site_id,
-                "parameterCd": ",".join(PARAM_MAP.keys()),
-                "startDT": start_str,
-                "endDT": end_str,
-            }
-
-            attempt = 0
-            data = None
-            while attempt < 3:
-                try:
-                    response = requests.get(url, params=params, timeout=30)
-                    response.raise_for_status()
-                    data = response.json()
-                    break
-                except requests.exceptions.RequestException as e:
-                    attempt += 1
-                    logging.warning(f"Site {site_id}: request attempt {attempt} failed - {e}")
-                    if attempt >= 3:
-                        # give up on this site, move to next
-                        data = None
-                        break
-                    # simple exponential backoff
-                    time.sleep(2 ** attempt)
-
-            # if we didn't get any data after retries, skip this site
-            if data is None:
-                continue
-
-            # parse the returned JSON, handling possible missing fields
             try:
-                if "value" not in data or "timeSeries" not in data.get("value", {}):
-                    logging.debug(f"Site {site_id}: No data available")
-                    continue
+                df, metadata = waterdata.get_continuous(
+                    monitoring_location_id=f"USGS-{station['agency_sid']}",
+                    parameter_code=param,
+                    time=f"{start_str}/{end_str}"
+                )
 
-                time_series_list = data["value"]["timeSeries"]
-                if not time_series_list:
-                    logging.debug(f"Site {site_id}: No observations in date range")
-                    continue
+                # Convert value column into meters
+                df["value"] = df["value"] * 0.3048
+                # Convert time into datetime with utc
+                df["time"] = pd.to_datetime(df["time"], utc=True)
 
-                site_records = 0
-
-                # Parse each time series (one per parameter) and transform to schema format
-                for ts in time_series_list:
-                    param_code = ts["variable"]["variableCode"][0]["value"]
-
-                    if param_code not in PARAM_MAP:
-                        continue
-
-                    param = PARAM_MAP[param_code]
-                    unit_code = ts["variable"]["unit"]["unitCode"]
-
-                    # Handle case where values might be in different structure
-                    values_list = ts.get("values", [{}])[0].get("value", [])
-
-                    for v in values_list:
-                        numeric_value = _coerce_valid_float(v.get("value"))
-                        if numeric_value is None:
-                            continue
-
-                        val, units = _normalize_usgs_value(param_code, unit_code, numeric_value)
-
-                        # Normalize USGS datetime to UTC. USGS returns offset-aware strings
-                        # like "2026-03-25T04:07:00.000-04:00"; storing them raw causes
-                        # SQL Server datetime2 to strip the offset and keep the local time,
-                        # leading to duplicate-key errors on subsequent fetches.
-                        raw_dt = v["dateTime"]
-                        try:
-                            parsed_dt = datetime.fromisoformat(raw_dt)
-                            if parsed_dt.tzinfo is not None:
-                                parsed_dt = parsed_dt.astimezone(timezone.utc)
-                            dt_str = parsed_dt.strftime("%Y-%m-%dT%H:%M:%S")
-                        except ValueError:
-                            dt_str = raw_dt
-
-                        usgs_observations.append({
-                            "station_id": site_id,
-                            "title": site_title,
-                            "parameter": param,
-                            "value": val,
-                            "units": units,
-                            "datetime_utc": dt_str
+                for row in df.itertuples():
+                    usgs_observations.append({
+                        "sid": station["sid"],
+                        "param": param,
+                        "dt": row.time,
+                        "value": row.value,
                         })
-
-                        site_records += 1
-
-                logging.info(f"Site {site_id}: {site_records} records retrieved")
-
-            except (KeyError, ValueError, IndexError) as e:
-                logging.warning(f"Site {site_id}: Parse error - {e}")
-            except requests.exceptions.RequestException as e:
-                # although we handled network errors in the retry loop, keep this
-                logging.warning(f"Site {site_id}: Connection error - {e}")
+                    
+                #For the last row, set the ext_latest_data for the param
+                last_row = df.iloc[-1]
+                update_latest_data.append({
+                    "sid": station["sid"],
+                    "param": param,
+                    "dt": last_row.t,
+                    "value": last_row.v,
+                    "dt_last_upd": END_DATE.isoformat()
+                })
+            except Exception as e:
+                logging.warning(f"Error fetching USGS station {station["sid"]} {param}: {e}")
 
         logging.info(f"USGS observations: {len(usgs_observations)} records")
-        return usgs_observations
+        all_observations.extend(usgs_observations)
     
-    end_dt = datetime.now(timezone.utc)
-
-    def _ensure_utc(dt: datetime) -> datetime:
-        """Ensure a datetime has UTC tzinfo so .astimezone() behaves predictably."""
-        if dt is None:
-            return None
-        if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-
-    # Extract the latest datetime from the input binding, then advance slightly to avoid overlapping
-    if last_datetime_row:
-        last_dt_str = last_datetime_row[0]["last_dt"]
-        last_dt = _parse_last_datetime(last_dt_str)
-        last_dt = _ensure_utc(last_dt)
-        # Increment a small amount so we don't refetch the same timestamp (avoids unique key conflicts)
-        start_dt = last_dt + timedelta(minutes=1)
-    else:
-        start_dt = end_dt - timedelta(days=7)  # Fallback
-
-    # Ensure start_dt is not in the future (edge case) and not after end_dt
-    if start_dt >= end_dt:
-        start_dt = end_dt - timedelta(minutes=15)
-    
-    logging.info(f"Fetching data from {start_dt} to {end_dt}...")
+    logging.info(f"Fetching data at {END_DATE}...")
 
     try:
-        logging.info("Fetching NOAA data...")
-        noaa_obs = fetch_noaa(start_dt, end_dt)
+        #NOTE: station_list: [{"sid": "U222" or "N022","agency": "USGS" or "NOS","agency_sid": "1408168"}, ...]
+        for station in station_list:
+            if station.agency == "NOS":
+                fetch_noaa(station)
+            elif station.agency == "USGS":
+                fetch_usgs(station)
+            else:
+                #NOTE: will need to create new functions for other stations
+                continue
         
-        logging.info("Fetching USGS data...")
-        usgs_obs = fetch_usgs(start_dt, end_dt)
+        logging.info(f"Total observations: {len(all_observations)} records")
         
-        # Combine observations from both sources
-        all_observations = noaa_obs + usgs_obs
-        logging.info(f"Total observations from both sources: {len(all_observations)} records")
-        
-        # Convert observations to SqlRow objects and insert via output binding
         if all_observations:
             logging.info(f"Inserting {len(all_observations)} observations into database...")
-            rows = func.SqlRowList()
+            observation_rows = func.SqlRowList()
             for obs in all_observations:
                 row = func.SqlRow.from_dict(obs)
-                rows.append(row)
-            output_rows.set(rows)
-            logging.info("Observations inserted successfully")
+                observation_rows.append(row)
+            output_list.set(observation_rows)
+
+        if update_latest_data:
+            logging.info(f"Inserting {len(update_latest_data)} latest_data into database...")
+            latest_data_rows = func.SqlRowList()
+            for data in update_latest_data:
+                row = func.SqlRow.from_dict(data)
+                latest_data_rows.append(row)
+            output_latest_data_list.set(latest_data_rows)
+        
+        logging.info("Observations inserted successfully")
         
     except Exception as e:
         logging.error(f"Error in timer trigger: {e}", exc_info=True)
 
 
-@app.route(route="stations", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
-@app.sql_input(arg_name="sql_rows",
-               command_text="SELECT station_id, MAX(title) AS title FROM observations GROUP BY station_id ORDER BY station_id",
-               connection_string_setting="SqlConnectionString")
-def getStations(req: func.HttpRequest, sql_rows: func.SqlRowList) -> func.HttpResponse:
+@app.route(route="station-list", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
+@app.sql_input(arg_name="station_list", command_text="SELECT sid, agency, agency_sid FROM ext_stations", connection_string_setting="SqlConnectionString")
+def getStations(req: func.HttpRequest, station_list: func.SqlRowList) -> func.HttpResponse:
     """HTTP trigger function to get list of unique stations from the database."""
     logging.info('getStations HTTP trigger function called.')
     
     try:
-        stations = []
-        for row in sql_rows:
-            stations.append({
-                "station_id": row["station_id"],
-                "title": row.get("title")
-            })
-        
         return func.HttpResponse(
-            json.dumps(stations),
+            json.dumps(station_list),
             status_code=200,
             mimetype="application/json"
         )
     except Exception as e:
-        logging.error(f"Error retrieving stations: {e}")
+        logging.error(f"Error retrieving station list: {e}")
+
         return func.HttpResponse(
-            json.dumps({"error": "Failed to retrieve stations"}),
+            json.dumps({"error": "Failed to retrieve station list"}),
             status_code=500,
             mimetype="application/json"
         )
 
 
-@app.route(route="station-data/{station_id}/{start_date}/{end_date}", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="station-data/{station_id}/{start_date}/{end_date}", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
 @app.sql_input(
     arg_name="station_rows",
-    command_text="SELECT station_id, title, parameter, value, units, datetime_utc FROM observations WHERE station_id = @station_id AND TRY_CONVERT(datetime2, @start_date, 23) IS NOT NULL AND TRY_CONVERT(datetime2, @end_date, 23) IS NOT NULL AND datetime_utc >= TRY_CONVERT(datetime2, @start_date, 23) AND datetime_utc < DATEADD(DAY, 1, TRY_CONVERT(datetime2, @end_date, 23)) ORDER BY datetime_utc",
+    command_text="SELECT sid, param, dt, val FROM ext_observations WHERE sid = @station_id AND TRY_CONVERT(datetime2, @start_date) IS NOT NULL AND TRY_CONVERT(datetime2, @end_date) IS NOT NULL AND dt >= TRY_CONVERT(datetime2, @start_date) AND dt <= TRY_CONVERT(datetime2, @end_date) ORDER BY dt;",
     connection_string_setting="SqlConnectionString",
     parameters="@station_id={station_id},@start_date={start_date},@end_date={end_date}"
 )
@@ -442,37 +292,9 @@ def getStationData(
     logging.info('getStationData HTTP trigger function called. station_id=%s start_date=%s end_date=%s', station_id, start_date, end_date)
 
     try:
-        # Accept only date-only route params in yyyy-MM-dd format.
-        parsed_start = datetime.strptime(start_date, "%Y-%m-%d")
-        parsed_end = datetime.strptime(end_date, "%Y-%m-%d")
-
-        if parsed_end < parsed_start:
-            return func.HttpResponse(
-                json.dumps({"error": "end_date must be on or after start_date"}),
-                status_code=400,
-                mimetype="application/json"
-            )
-
-        results = []
-        for row in station_rows:
-            results.append({
-                "station_id": row["station_id"],
-                "title": row.get("title"),
-                "parameter": row["parameter"],
-                "value": row["value"],
-                "units": row.get("units"),
-                "datetime_utc": row["datetime_utc"],
-            })
-
         return func.HttpResponse(
-            json.dumps(results),
+            json.dumps(station_rows),
             status_code=200,
-            mimetype="application/json"
-        )
-    except ValueError:
-        return func.HttpResponse(
-            json.dumps({"error": "start_date and end_date must be in yyyy-MM-dd format"}),
-            status_code=400,
             mimetype="application/json"
         )
     except Exception as e:
@@ -484,18 +306,15 @@ def getStationData(
         )
 
 
-@app.route(route="station-details", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="station-details", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
 def getStationDetails(req: func.HttpRequest) -> func.HttpResponse:
-    """HTTP trigger function to proxy the external JS file with station data."""
+    """HTTP trigger function to get the Hudson server JS file."""
     logging.info('getStationDetails HTTP trigger function called.')
     
     try:
-        # Fetch the external JS file
-        url = "http://hudson.dl.stevens-tech.edu/sfas/sfas_stations2.js"
-        response = requests.get(url, timeout=30)
+        response = requests.get("http://hudson.dl.stevens-tech.edu/sfas/sfas_stations2.js", timeout=30)
         response.raise_for_status()
         
-        # Return the JS content with appropriate headers
         return func.HttpResponse(
             response.text,
             status_code=200,
