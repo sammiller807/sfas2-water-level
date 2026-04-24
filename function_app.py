@@ -286,7 +286,7 @@ def getStationList(req: func.HttpRequest, station_list: func.SqlRowList) -> func
         )
 
 
-@app.route(route="station-data/{station_id}/{start_date}/{end_date}", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
+@app.route(route="station-data/{station_id}/{start_date}/{end_date}", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 @app.sql_input(
     arg_name="station_rows",
     command_text="SELECT sid, param, dt, val FROM ext_observations WHERE sid = @station_id AND TRY_CONVERT(datetime2, @start_date) IS NOT NULL AND TRY_CONVERT(datetime2, @end_date) IS NOT NULL AND dt >= TRY_CONVERT(datetime2, @start_date) AND dt <= TRY_CONVERT(datetime2, @end_date) ORDER BY dt;",
@@ -327,7 +327,7 @@ def getStationDataTimeSeries(
         )
 
 
-@app.route(route="station-details", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
+@app.route(route="station-details", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def getHudsonStationDetails(req: func.HttpRequest) -> func.HttpResponse:
     """HTTP trigger function to get the Hudson server JS file."""
     logging.info('getStationDetails HTTP trigger function called.')
