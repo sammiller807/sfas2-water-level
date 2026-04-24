@@ -2,7 +2,6 @@ import logging
 import json
 import azure.functions as func
 import requests
-import pandas as pd
 from noaa_coops import Station
 from datetime import datetime, timedelta, timezone
 from dataretrieval import waterdata
@@ -11,12 +10,12 @@ from dotenv import load_dotenv
 app = func.FunctionApp()
 load_dotenv()
 
-@app.timer_trigger(schedule="0 */15 * * * *", arg_name="myTimer", run_on_startup=True, use_monitor=False)
+@app.timer_trigger(schedule="0 */15 * * * *", arg_name="myTimer", run_on_startup=False, use_monitor=False)
 @app.sql_input(arg_name="station_list", command_text="SELECT sid, agency, agency_sid FROM ext_stations", connection_string_setting="SqlConnectionString")
 @app.sql_input(arg_name="latest_data_list", command_text="SELECT sid, param, dt FROM ext_latest_data", connection_string_setting="SqlConnectionString")
 @app.sql_output(arg_name="output_list", command_text="ext_observations", connection_string_setting="SqlConnectionString")
 @app.sql_output(arg_name="output_latest_data_list", command_text="ext_latest_data", connection_string_setting="SqlConnectionString")
-def obsData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_data_list: func.SqlRowList, output_list: func.Out[func.SqlRowList], output_latest_data_list: func.Out[func.SqlRowList]) -> None:
+def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_data_list: func.SqlRowList, output_list: func.Out[func.SqlRowList], output_latest_data_list: func.Out[func.SqlRowList]) -> None:
     logging.info('Timer trigger function executed.')
 
     if myTimer.past_due:
@@ -27,17 +26,19 @@ def obsData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_da
     # "00010": "Temperature, water, degrees Celsius",
     # "00020": "Temperature, air, degrees Celsius",
     # "00065": "Gage height, feet"
-    USGS_PARAM_CODES = [
-        "72279"
-    ]
+    USGS_PARAM_CODES = {
+        "PWL": "72279"
+    }
 
     # NOAA Products:
     # water_level: Preliminary or verified 6-minute interval water levels, depending on data availability.
     # air_temperature: Air temperature as measured at the station.
     # water_temperature: Water temperature as measured at the station.
-    NOS_PRODUCTS = [
-        "water_level"
-    ]
+    NOS_PRODUCTS = {
+        "PWL": "water_level"
+    }
+
+    #NOTE: PWL is Preliminary/Provisonal Water Level
 
     #NOTE: For one transaction, all observation data will be put into this one array
     all_observations = []
@@ -85,10 +86,10 @@ def obsData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_da
         
             lookup = {latest_data["param"]: latest_data for latest_data in nos_latest_data}
 
-        for product in NOS_PRODUCTS:
-            if lookup and product in lookup:
+        for param, product in NOS_PRODUCTS.items():
+            if lookup and param in lookup:
                 #NOTE: If product is in lookup, this will change start str to the last saved date
-                start_str = lookup[product]["dt"].strftime("%Y%m%d %H:%M")
+                start_str = lookup[param]["dt"].strftime("%Y%m%d %H:%M")
             else:
                 start_str = START_DATE.strftime("%Y%m%d %H:%M")
             
@@ -112,38 +113,40 @@ def obsData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_da
                 )
 
                 if df.empty:
-                    logging.info(f"NOAA station '{station["sid"]}' {product}: No data available")
+                    logging.info(f"NOAA station '{station["sid"]}' {param}: No data available")
                     continue
 
-                logging.info(f"NOAA station {station["sid"]} {product}: {len(df)} records retrieved")
+                logging.info(f"NOAA station {station["sid"]} {param}: {len(df)} records retrieved")
 
                 # Reset the index (because the time column is the index for whatever reason)
                 df.reset_index(inplace=True)
 
-                df["t"] = pd.to_datetime(df["t"], utc=True)
+                # Convert timestamp to datetime string
+                df["t"] = df["t"].apply(lambda x: x.isoformat())
+
 
                 #Iterate over the dataframe and append them to the observations
                 # NOAA API Response Help: https://api.tidesandcurrents.noaa.gov/api/prod/responseHelp.html
                 for row in df.itertuples():
                     nos_observations.append({
                         "sid": station["sid"],
-                        "param": product,
+                        "param": param,
                         "dt": row.t,
-                        "value": row.v,
+                        "val": row.v,
                         })
                 
-                #For the last row, set the ext_latest_data for the product -- only do this at the end of the function, so save this somewhere
+                #For the last row, set the ext_latest_data for the param
                 last_row = df.iloc[-1]
                 update_latest_data.append({
                     "sid": station["sid"],
-                    "param": product,
+                    "param": param,
                     "dt": last_row.t,
-                    "value": last_row.v,
+                    "val": last_row.v,
                     "dt_last_upd": END_DATE.isoformat()
                 })
                 
             except Exception as e:
-                logging.warning(f"Error fetching NOAA station {station["sid"]} {product}: {e}")
+                logging.warning(f"Error fetching NOAA station {station["sid"]} {param}: {e}")
             
         logging.info(f"NOAA observations: {len(nos_observations)} records")
         all_observations.extend(nos_observations)
@@ -173,7 +176,7 @@ def obsData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_da
         
             lookup = {latest_data["param"]: latest_data for latest_data in usgs_latest_data}
 
-        for param in USGS_PARAM_CODES:
+        for param, code in USGS_PARAM_CODES.items():
             if lookup and param in lookup:
                 #NOTE: If product is in look, this will change start str to the last saved date
                 start_str = lookup[param]["dt"].isoformat()
@@ -183,21 +186,22 @@ def obsData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_da
             try:
                 df, metadata = waterdata.get_continuous(
                     monitoring_location_id=f"USGS-{station['agency_sid']}",
-                    parameter_code=param,
+                    parameter_code=code,
                     time=f"{start_str}/{end_str}"
                 )
 
                 # Convert value column into meters
                 df["value"] = df["value"] * 0.3048
-                # Convert time into datetime with utc
-                df["time"] = pd.to_datetime(df["time"], utc=True)
+
+                # Convert timestamp to datetime string
+                df["time"] = df["time"].apply(lambda x: x.isoformat())
 
                 for row in df.itertuples():
                     usgs_observations.append({
                         "sid": station["sid"],
                         "param": param,
                         "dt": row.time,
-                        "value": row.value,
+                        "val": row.value,
                         })
                     
                 #For the last row, set the ext_latest_data for the param
@@ -205,8 +209,8 @@ def obsData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_da
                 update_latest_data.append({
                     "sid": station["sid"],
                     "param": param,
-                    "dt": last_row.t,
-                    "value": last_row.v,
+                    "dt": last_row.time,
+                    "val": last_row.value,
                     "dt_last_upd": END_DATE.isoformat()
                 })
             except Exception as e:
@@ -220,12 +224,12 @@ def obsData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_da
     try:
         #NOTE: station_list: [{"sid": "U222" or "N022","agency": "USGS" or "NOS","agency_sid": "1408168"}, ...]
         for station in station_list:
-            if station.agency == "NOS":
+            if station.get("agency") == "NOS":
                 fetch_noaa(station)
-            elif station.agency == "USGS":
+            elif station.get("agency") == "USGS":
                 fetch_usgs(station)
             else:
-                #NOTE: will need to create new functions for other stations
+                #NOTE: Call new functions for fetching data HERE
                 continue
         
         logging.info(f"Total observations: {len(all_observations)} records")
@@ -237,6 +241,7 @@ def obsData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_da
                 row = func.SqlRow.from_dict(obs)
                 observation_rows.append(row)
             output_list.set(observation_rows)
+            logging.info("Observations inserted successfully")
 
         if update_latest_data:
             logging.info(f"Inserting {len(update_latest_data)} latest_data into database...")
@@ -245,8 +250,7 @@ def obsData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_da
                 row = func.SqlRow.from_dict(data)
                 latest_data_rows.append(row)
             output_latest_data_list.set(latest_data_rows)
-        
-        logging.info("Observations inserted successfully")
+            logging.info("Latest data inserted successfully")
         
     except Exception as e:
         logging.error(f"Error in timer trigger: {e}", exc_info=True)
@@ -254,13 +258,21 @@ def obsData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_da
 
 @app.route(route="station-list", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
 @app.sql_input(arg_name="station_list", command_text="SELECT sid, agency, agency_sid FROM ext_stations", connection_string_setting="SqlConnectionString")
-def getStations(req: func.HttpRequest, station_list: func.SqlRowList) -> func.HttpResponse:
+def getStationList(req: func.HttpRequest, station_list: func.SqlRowList) -> func.HttpResponse:
     """HTTP trigger function to get list of unique stations from the database."""
     logging.info('getStations HTTP trigger function called.')
     
     try:
+        stations = []
+        for row in station_list:
+            stations.append({
+                "sid": row["sid"],
+                "agency": row["agency"],
+                "agency_sid": row["agency_sid"]
+            })
+
         return func.HttpResponse(
-            json.dumps(station_list),
+            json.dumps(stations),
             status_code=200,
             mimetype="application/json"
         )
@@ -281,7 +293,7 @@ def getStations(req: func.HttpRequest, station_list: func.SqlRowList) -> func.Ht
     connection_string_setting="SqlConnectionString",
     parameters="@station_id={station_id},@start_date={start_date},@end_date={end_date}"
 )
-def getStationData(
+def getStationDataTimeSeries(
     req: func.HttpRequest,
     station_rows: func.SqlRowList
 ) -> func.HttpResponse:
@@ -289,11 +301,20 @@ def getStationData(
     station_id = req.route_params.get("station_id")
     start_date = req.route_params.get("start_date")
     end_date = req.route_params.get("end_date")
-    logging.info('getStationData HTTP trigger function called. station_id=%s start_date=%s end_date=%s', station_id, start_date, end_date)
+    logging.info('getStationData HTTP trigger function called: station_id=%s start_date=%s end_date=%s', station_id, start_date, end_date)
 
     try:
+        stations = []
+        for row in station_rows:
+            stations.append({
+                "sid": row["sid"],
+                "param": row["param"],
+                "dt": row["dt"],
+                "val": row["val"]
+            })
+
         return func.HttpResponse(
-            json.dumps(station_rows),
+            json.dumps(stations),
             status_code=200,
             mimetype="application/json"
         )
@@ -307,7 +328,7 @@ def getStationData(
 
 
 @app.route(route="station-details", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
-def getStationDetails(req: func.HttpRequest) -> func.HttpResponse:
+def getHudsonStationDetails(req: func.HttpRequest) -> func.HttpResponse:
     """HTTP trigger function to get the Hudson server JS file."""
     logging.info('getStationDetails HTTP trigger function called.')
     
