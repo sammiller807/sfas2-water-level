@@ -89,7 +89,7 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
         for param, product in NOS_PRODUCTS.items():
             if lookup and param in lookup:
                 #NOTE: If product is in lookup, this will change start str to the last saved date
-                start_str = lookup[param]["dt"].strftime("%Y%m%d %H:%M")
+                start_str = datetime.fromisoformat(lookup[param]["dt"]).strftime("%Y%m%d %H:%M")
             else:
                 start_str = START_DATE.strftime("%Y%m%d %H:%M")
             
@@ -179,7 +179,7 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
         for param, code in USGS_PARAM_CODES.items():
             if lookup and param in lookup:
                 #NOTE: If product is in look, this will change start str to the last saved date
-                start_str = lookup[param]["dt"].isoformat()
+                start_str = datetime.fromisoformat(lookup[param]["dt"]).isoformat()
             else:
                 start_str = START_DATE.isoformat()
 
