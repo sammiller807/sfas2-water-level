@@ -8,7 +8,7 @@ from dataretrieval import waterdata
 from dotenv import load_dotenv
 
 app = func.FunctionApp()
-load_dotenv()
+#load_dotenv()
 
 @app.timer_trigger(schedule="0 */15 * * * *", arg_name="myTimer", run_on_startup=False, use_monitor=False)
 @app.sql_input(arg_name="station_list", command_text="SELECT sid, agency, agency_sid FROM ext_stations", connection_string_setting="SqlConnectionString")
@@ -256,7 +256,7 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
         logging.error(f"Error in timer trigger: {e}", exc_info=True)
 
 
-@app.route(route="station-list", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
+@app.route(route="station-list", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 @app.sql_input(arg_name="station_list", command_text="SELECT sid, agency, agency_sid FROM ext_stations", connection_string_setting="SqlConnectionString")
 def getStationList(req: func.HttpRequest, station_list: func.SqlRowList) -> func.HttpResponse:
     """HTTP trigger function to get list of unique stations from the database."""
