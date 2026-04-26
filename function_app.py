@@ -59,9 +59,6 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
         Args:
             station: dictionary of station data. Expects keys: sid, agency, agency_sid
         """
-
-        station_obj = Station(station["agency_sid"])
-
         nos_observations = []
         
         # Format dates for NOAA API
@@ -94,6 +91,8 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
                 start_str = START_DATE.strftime("%Y%m%d %H:%M")
             
             try:
+                station_obj = Station(station["agency_sid"])
+
                 if(product == "water_level"):
                     df = station_obj.get_data(
                     begin_date=start_str,
