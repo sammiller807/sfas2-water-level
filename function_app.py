@@ -2,6 +2,7 @@ import logging
 import json
 import azure.functions as func
 import requests
+import pandas as pd
 from noaa_coops import Station
 from datetime import datetime, timedelta, timezone
 from dataretrieval import waterdata
@@ -122,7 +123,8 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
 
                 # Convert timestamp to datetime string
                 df["t"] = df["t"].apply(lambda x: x.isoformat())
-
+                # Convert value into a float from a numpy.float64
+                df["v"] = df["v"].apply(lambda x: float(x))
 
                 #Iterate over the dataframe and append them to the observations
                 # NOAA API Response Help: https://api.tidesandcurrents.noaa.gov/api/prod/responseHelp.html
@@ -191,8 +193,9 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
                     time=f"{start_str}/{end_str}"
                 )
 
-                # Convert value column into meters
+                # Convert value into meters, then into a float from a numpy.float64
                 df["value"] = df["value"] * 0.3048
+                df["value"] = df["value"].apply(lambda x: float(x))
 
                 # Convert timestamp to datetime string
                 df["time"] = df["time"].apply(lambda x: x.isoformat())
