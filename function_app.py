@@ -5,18 +5,19 @@ import requests
 from noaa_coops import Station
 from datetime import datetime, timedelta, timezone
 from dataretrieval import waterdata
-from dotenv import load_dotenv
+import os
 
 app = func.FunctionApp()
-load_dotenv()
 
 @app.timer_trigger(schedule="0 */15 * * * *", arg_name="myTimer", run_on_startup=False, use_monitor=False)
 @app.sql_input(arg_name="station_list", command_text="SELECT sid, agency, agency_sid FROM ext_stations", connection_string_setting="SqlConnectionString")
 @app.sql_input(arg_name="latest_data_list", command_text="SELECT sid, param, dt FROM ext_latest_data", connection_string_setting="SqlConnectionString")
 @app.sql_output(arg_name="output_list", command_text="ext_observations", connection_string_setting="SqlConnectionString")
 @app.sql_output(arg_name="output_latest_data_list", command_text="ext_latest_data", connection_string_setting="SqlConnectionString")
-def obsData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_data_list: func.SqlRowList, output_list: func.Out[func.SqlRowList], output_latest_data_list: func.Out[func.SqlRowList]) -> None:
+def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_data_list: func.SqlRowList, output_list: func.Out[func.SqlRowList], output_latest_data_list: func.Out[func.SqlRowList]) -> None:
     logging.info('Timer trigger function executed.')
+
+    os.getenv("API_USGS_PAT")
 
     if myTimer.past_due:
         logging.warning('Timer trigger is running past due')
@@ -259,7 +260,7 @@ def obsData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_da
 
 @app.route(route="station-list", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 @app.sql_input(arg_name="station_list", command_text="SELECT sid, agency, agency_sid FROM ext_stations", connection_string_setting="SqlConnectionString")
-def getStations(req: func.HttpRequest, station_list: func.SqlRowList) -> func.HttpResponse:
+def getStationList(req: func.HttpRequest, station_list: func.SqlRowList) -> func.HttpResponse:
     """HTTP trigger function to get list of unique stations from the database."""
     logging.info('getStations HTTP trigger function called.')
     
@@ -288,7 +289,7 @@ def getStations(req: func.HttpRequest, station_list: func.SqlRowList) -> func.Ht
     connection_string_setting="SqlConnectionString",
     parameters="@station_id={station_id},@start_date={start_date},@end_date={end_date}"
 )
-def getStationData(
+def getStationDataTimeSeries(
     req: func.HttpRequest,
     station_rows: func.SqlRowList
 ) -> func.HttpResponse:
@@ -316,7 +317,7 @@ def getStationData(
 
 
 @app.route(route="station-details", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
-def getStationDetails(req: func.HttpRequest) -> func.HttpResponse:
+def getHudsonStationDetails(req: func.HttpRequest) -> func.HttpResponse:
     """HTTP trigger function to get the Hudson server JS file."""
     logging.info('getStationDetails HTTP trigger function called.')
     
