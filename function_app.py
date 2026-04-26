@@ -8,7 +8,7 @@ from dataretrieval import waterdata
 from dotenv import load_dotenv
 
 app = func.FunctionApp()
-#load_dotenv()
+load_dotenv()
 
 @app.timer_trigger(schedule="0 */15 * * * *", arg_name="myTimer", run_on_startup=False, use_monitor=False)
 @app.sql_input(arg_name="station_list", command_text="SELECT sid, agency, agency_sid FROM ext_stations", connection_string_setting="SqlConnectionString")
@@ -27,7 +27,7 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
     # "00020": "Temperature, air, degrees Celsius",
     # "00065": "Gage height, feet"
     USGS_PARAM_CODES = {
-        "PWL": "72279"
+        "UWL": "72279"
     }
 
     # NOAA Products:
@@ -35,10 +35,10 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
     # air_temperature: Air temperature as measured at the station.
     # water_temperature: Water temperature as measured at the station.
     NOS_PRODUCTS = {
-        "PWL": "water_level"
+        "UWL": "water_level"
     }
 
-    #NOTE: PWL is Preliminary/Provisonal Water Level
+    #NOTE: UWL is Preliminary/Provisonal Water Level -- aka Unverified Water Level
 
     #NOTE: For one transaction, all observation data will be put into this one array
     all_observations = []
@@ -57,7 +57,6 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
         
         Args:
             station: dictionary of station data. Expects keys: sid, agency, agency_sid
-            end_dt: The current datetime. Should be UTC
         """
 
         station_obj = Station(station["agency_sid"])
@@ -152,8 +151,10 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
         all_observations.extend(nos_observations)
     
     def fetch_usgs(station: dict[str, str]) -> None:
-        """Fetch USGS data using Instantaneous Values API (NWIS IV).
+        """Fetch USGS data using the Water Data API.
         
+        https://api.waterdata.usgs.gov/ogcapi/v0/openapi?f=html#/continuous
+
         Args:
             station: dictionary of station data. Expects keys: sid, agency, agency_sid
         """
@@ -263,13 +264,7 @@ def getStationList(req: func.HttpRequest, station_list: func.SqlRowList) -> func
     logging.info('getStations HTTP trigger function called.')
     
     try:
-        stations = []
-        for row in station_list:
-            stations.append({
-                "sid": row["sid"],
-                "agency": row["agency"],
-                "agency_sid": row["agency_sid"]
-            })
+        stations = list(map(lambda r: json.loads(r.to_json()), station_list))
 
         return func.HttpResponse(
             json.dumps(stations),
@@ -304,14 +299,7 @@ def getStationDataTimeSeries(
     logging.info('getStationData HTTP trigger function called: station_id=%s start_date=%s end_date=%s', station_id, start_date, end_date)
 
     try:
-        stations = []
-        for row in station_rows:
-            stations.append({
-                "sid": row["sid"],
-                "param": row["param"],
-                "dt": row["dt"],
-                "val": row["val"]
-            })
+        stations = list(map(lambda r: json.loads(r.to_json()), station_rows))
 
         return func.HttpResponse(
             json.dumps(stations),
