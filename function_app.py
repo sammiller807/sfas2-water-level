@@ -10,8 +10,8 @@ import os
 app = func.FunctionApp()
 
 @app.timer_trigger(schedule="0 */15 * * * *", arg_name="myTimer", run_on_startup=False, use_monitor=False)
-@app.sql_input(arg_name="station_list", command_text="SELECT sid, agency, agency_sid FROM ext_stations", connection_string_setting="SqlConnectionString")
-@app.sql_input(arg_name="latest_data_list", command_text="SELECT sid, param, dt FROM ext_latest_data", connection_string_setting="SqlConnectionString")
+@app.sql_input(arg_name="station_list", command_text="SELECT sid, agency, agency_sid FROM dbo.ext_stations", connection_string_setting="SqlConnectionString")
+@app.sql_input(arg_name="latest_data_list", command_text="SELECT sid, param, dt FROM dbo.ext_latest_data", connection_string_setting="SqlConnectionString")
 @app.sql_output(arg_name="output_list", command_text="ext_observations", connection_string_setting="SqlConnectionString")
 @app.sql_output(arg_name="output_latest_data_list", command_text="ext_latest_data", connection_string_setting="SqlConnectionString")
 def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowList, latest_data_list: func.SqlRowList, output_list: func.Out[func.SqlRowList], output_latest_data_list: func.Out[func.SqlRowList]) -> None:
@@ -258,7 +258,7 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
 
 
 @app.route(route="station-list", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
-@app.sql_input(arg_name="station_list", command_text="SELECT sid, agency, agency_sid FROM ext_stations", connection_string_setting="SqlConnectionString")
+@app.sql_input(arg_name="station_list", command_text="SELECT sid, agency, agency_sid FROM dbo.ext_stations", connection_string_setting="SqlConnectionString")
 def getStationList(req: func.HttpRequest, station_list: func.SqlRowList) -> func.HttpResponse:
     """HTTP trigger function to get list of unique stations from the database."""
     logging.info('getStations HTTP trigger function called.')
@@ -284,7 +284,7 @@ def getStationList(req: func.HttpRequest, station_list: func.SqlRowList) -> func
 @app.route(route="station-data/{station_id}/{start_date}/{end_date}", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 @app.sql_input(
     arg_name="station_rows",
-    command_text="SELECT sid, param, dt, val FROM ext_observations WHERE sid = @station_id AND TRY_CONVERT(datetime2, @start_date) IS NOT NULL AND TRY_CONVERT(datetime2, @end_date) IS NOT NULL AND dt >= TRY_CONVERT(datetime2, @start_date) AND dt <= TRY_CONVERT(datetime2, @end_date) ORDER BY dt;",
+    command_text="SELECT sid, param, dt, val FROM dbo.ext_observations WHERE sid = @station_id AND TRY_CONVERT(datetime2, @start_date) IS NOT NULL AND TRY_CONVERT(datetime2, @end_date) IS NOT NULL AND dt >= TRY_CONVERT(datetime2, @start_date) AND dt <= TRY_CONVERT(datetime2, @end_date) ORDER BY dt;",
     connection_string_setting="SqlConnectionString",
     parameters="@station_id={station_id},@start_date={start_date},@end_date={end_date}"
 )
