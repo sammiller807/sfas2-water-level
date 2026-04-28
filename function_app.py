@@ -283,14 +283,21 @@ def getStationList(req: func.HttpRequest, station_list: func.SqlRowList) -> func
 
 @app.route(route="station-data/{station_id}/{start_date}/{end_date}", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 @app.sql_input(
-    arg_name="station_rows",
+    arg_name="observation_rows",
     command_text="SELECT sid, param, dt, val FROM dbo.ext_observations WHERE sid = @station_id AND TRY_CONVERT(datetime2, @start_date) IS NOT NULL AND TRY_CONVERT(datetime2, @end_date) IS NOT NULL AND dt >= TRY_CONVERT(datetime2, @start_date) AND dt <= TRY_CONVERT(datetime2, @end_date) ORDER BY dt;",
+    connection_string_setting="SqlConnectionString",
+    parameters="@station_id={station_id},@start_date={start_date},@end_date={end_date}"
+)
+@app.sql_input(
+    arg_name="forecast_rows",
+    command_text="SELECT sid, param, dt, val, upper, lower FROM dbo.ext_forecast WHERE sid = @station_id AND TRY_CONVERT(datetime2, @start_date) IS NOT NULL AND TRY_CONVERT(datetime2, @end_date) IS NOT NULL AND dt >= TRY_CONVERT(datetime2, @start_date) AND dt <= TRY_CONVERT(datetime2, @end_date) ORDER BY dt;",
     connection_string_setting="SqlConnectionString",
     parameters="@station_id={station_id},@start_date={start_date},@end_date={end_date}"
 )
 def getStationDataTimeSeries(
     req: func.HttpRequest,
-    station_rows: func.SqlRowList
+    observation_rows: func.SqlRowList,
+    forecast_rows: func.SqlRowList
 ) -> func.HttpResponse:
     """HTTP trigger function to fetch observations for a given station and date range."""
     station_id = req.route_params.get("station_id")
@@ -299,10 +306,11 @@ def getStationDataTimeSeries(
     logging.info('getStationData HTTP trigger function called: station_id=%s start_date=%s end_date=%s', station_id, start_date, end_date)
 
     try:
-        stations = list(map(lambda r: json.loads(r.to_json()), station_rows))
+        observations = list(map(lambda r: json.loads(r.to_json()), observation_rows))
+        forecasts = list(map(lambda r: json.loads(r.to_json()), forecast_rows))
 
         return func.HttpResponse(
-            json.dumps(stations),
+            json.dumps({"observations": observations, "forecasts": forecasts}),
             status_code=200,
             mimetype="application/json"
         )
