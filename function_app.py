@@ -121,28 +121,26 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
                 # Reset the index (because the time column is the index for whatever reason)
                 df.reset_index(inplace=True)
 
-                # Convert timestamp to datetime string
-                df["t"] = df["t"].apply(lambda x: x.isoformat())
-                # Convert value into a float from a numpy.float64
-                df["v"] = df["v"].apply(lambda x: float(x))
+                # Convert dataframe to JSON
+                records = json.loads(df.to_json(orient="records", date_format="iso"))
 
                 #Iterate over the dataframe and append them to the observations
                 # NOAA API Response Help: https://api.tidesandcurrents.noaa.gov/api/prod/responseHelp.html
-                for row in df.itertuples():
+                for row in records:
                     nos_observations.append({
                         "sid": station["sid"],
                         "param": param,
-                        "dt": row.t,
-                        "val": row.v,
+                        "dt": row["t"],
+                        "val": row["v"],
                         })
                 
                 #For the last row, set the ext_latest_data for the param
-                last_row = df.iloc[-1]
+                last_row = records[-1]
                 update_latest_data.append({
                     "sid": station["sid"],
                     "param": param,
-                    "dt": last_row.t,
-                    "val": last_row.v,
+                    "dt": last_row["t"],
+                    "val": last_row["v"],
                     "dt_last_upd": END_DATE.isoformat()
                 })
                 
@@ -193,28 +191,27 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
                     time=f"{start_str}/{end_str}"
                 )
 
-                # Convert value into meters, then into a float from a numpy.float64
+                # Convert value into meters
                 df["value"] = df["value"] * 0.3048
-                df["value"] = df["value"].apply(lambda x: float(x))
 
-                # Convert timestamp to datetime string
-                df["time"] = df["time"].apply(lambda x: x.isoformat())
+                # Convert dataframe to JSON
+                records = json.loads(df.to_json(orient="records", date_format="iso"))
 
-                for row in df.itertuples():
+                for row in records:
                     usgs_observations.append({
                         "sid": station["sid"],
                         "param": param,
-                        "dt": row.time,
-                        "val": row.value,
+                        "dt": row["time"],
+                        "val": row["value"],
                         })
                     
                 #For the last row, set the ext_latest_data for the param
-                last_row = df.iloc[-1]
+                last_row = records[-1]
                 update_latest_data.append({
                     "sid": station["sid"],
                     "param": param,
-                    "dt": last_row.time,
-                    "val": last_row.value,
+                    "dt": last_row["time"],
+                    "val": last_row["value"],
                     "dt_last_upd": END_DATE.isoformat()
                 })
             except Exception as e:
