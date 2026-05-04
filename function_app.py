@@ -322,6 +322,29 @@ def getStationDataTimeSeries(
             mimetype="application/json"
         )
 
+@app.route(route="flood-map/{level}", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+@app.sql_input(arg_name="flood_data_rows", command_text="SELECT polygon_id, flood_level, dt, flooded, depth_class, depth_min, depth_max, area_sq_km, [geometry].STAsText() AS wkt FROM dbo.flood_map_data WHERE flood_level = @level", connection_string_setting="SqlConnectionString", parameters="@level={level}")
+def getFloodMapData(req: func.HttpRequest, flood_data_rows: func.SqlRowList) -> func.HttpResponse:
+    """HTTP trigger function to get the flood map data based on the level"""
+    level = req.route_params.get("level")
+    logging.info('getFloodMapData HTTP trigger function called: level=%s', level)
+
+    try:
+        flood_data = list(map(lambda r: json.loads(r.to_json()), flood_data_rows))
+
+        return func.HttpResponse(
+            json.dumps(flood_data),
+            status_code=200,
+            mimetype="applicaton/json"
+        )
+    except Exception as e:
+        logging.error(f"Error retrieving flood map data: {e}")
+        return func.HttpResponse(
+            json.dumps({"error": "Failed to retrieve flood map data"}),
+            status_code=500,
+            mimetype="application/json"
+        )
+    
 
 @app.route(route="station-details", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def getHudsonStationDetails(req: func.HttpRequest) -> func.HttpResponse:
