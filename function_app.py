@@ -284,13 +284,13 @@ def getStationList(req: func.HttpRequest, station_list: func.SqlRowList) -> func
 @app.route(route="station-data/{station_id}/{start_date}/{end_date}", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 @app.sql_input(
     arg_name="observation_rows",
-    command_text="SELECT sid, param, dt, val FROM dbo.ext_observations WHERE sid = @station_id AND TRY_CONVERT(datetime2, @start_date) IS NOT NULL AND TRY_CONVERT(datetime2, @end_date) IS NOT NULL AND dt >= TRY_CONVERT(datetime2, @start_date) AND dt <= TRY_CONVERT(datetime2, @end_date) ORDER BY dt;",
+    command_text="SELECT dt, val FROM dbo.ext_observations WHERE sid = @station_id AND TRY_CONVERT(datetime2, @start_date) IS NOT NULL AND TRY_CONVERT(datetime2, @end_date) IS NOT NULL AND dt >= TRY_CONVERT(datetime2, @start_date) AND dt <= TRY_CONVERT(datetime2, @end_date) ORDER BY dt;",
     connection_string_setting="SqlConnectionString",
     parameters="@station_id={station_id},@start_date={start_date},@end_date={end_date}"
 )
 @app.sql_input(
     arg_name="forecast_rows",
-    command_text="SELECT sid, param, dt, val, upper, lower FROM dbo.ext_forecast WHERE sid = @station_id AND TRY_CONVERT(datetime2, @start_date) IS NOT NULL AND TRY_CONVERT(datetime2, @end_date) IS NOT NULL AND dt >= TRY_CONVERT(datetime2, @start_date) AND dt <= TRY_CONVERT(datetime2, @end_date) ORDER BY dt;",
+    command_text="SELECT dt, val, upper, lower FROM dbo.ext_forecast WHERE sid = @station_id AND TRY_CONVERT(datetime2, @start_date) IS NOT NULL AND TRY_CONVERT(datetime2, @end_date) IS NOT NULL AND dt >= TRY_CONVERT(datetime2, @start_date) AND dt <= TRY_CONVERT(datetime2, @end_date) ORDER BY dt;",
     connection_string_setting="SqlConnectionString",
     parameters="@station_id={station_id},@start_date={start_date},@end_date={end_date}"
 )
