@@ -2,11 +2,11 @@ import logging
 import json
 import azure.functions as func
 import requests
-import pandas as pd
 from noaa_coops import Station
 from datetime import datetime, timedelta, timezone
 from dataretrieval import waterdata
 import os
+from azure.storage.blob import BlobServiceClient, ContentSettings
 
 app = func.FunctionApp()
 
@@ -256,29 +256,29 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
     except Exception as e:
         logging.error(f"Error in timer trigger: {e}", exc_info=True)
 
-
-@app.route(route="station-list", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
-@app.sql_input(arg_name="station_list", command_text="SELECT sid, agency, agency_sid FROM dbo.ext_stations", connection_string_setting="SqlConnectionString")
-def getStationList(req: func.HttpRequest, station_list: func.SqlRowList) -> func.HttpResponse:
-    """HTTP trigger function to get list of unique stations from the database."""
-    logging.info('getStations HTTP trigger function called.')
-    
-    try:
-        stations = list(map(lambda r: json.loads(r.to_json()), station_list))
-
-        return func.HttpResponse(
-            json.dumps(stations),
-            status_code=200,
-            mimetype="application/json"
-        )
-    except Exception as e:
-        logging.error(f"Error retrieving station list: {e}")
-
-        return func.HttpResponse(
-            json.dumps({"error": "Failed to retrieve station list"}),
-            status_code=500,
-            mimetype="application/json"
-        )
+#NOTE: Due to how long and expensive it was to run this function, the values will instead be hardcoded in the website code. These values were public anyway so that doesn't matter
+#@app.route(route="station-list", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+#@app.sql_input(arg_name="station_list", command_text="SELECT sid, agency, agency_sid FROM dbo.ext_stations", connection_string_setting="SqlConnectionString")
+#def getStationList(req: func.HttpRequest, station_list: func.SqlRowList) -> func.HttpResponse:
+#    """HTTP trigger function to get list of unique stations from the database."""
+#    logging.info('getStations HTTP trigger function called.')
+#    
+#    try:
+#        stations = list(map(lambda r: json.loads(r.to_json()), station_list))
+#
+#        return func.HttpResponse(
+#            json.dumps(stations),
+#            status_code=200,
+#            mimetype="application/json"
+#        )
+#    except Exception as e:
+#        logging.error(f"Error retrieving station list: {e}")
+#
+#        return func.HttpResponse(
+#            json.dumps({"error": "Failed to retrieve station list"}),
+#            status_code=500,
+#            mimetype="application/json"
+#        )
 
 
 @app.route(route="station-data/{station_id}/{start_date}/{end_date}", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
@@ -322,6 +322,38 @@ def getStationDataTimeSeries(
             mimetype="application/json"
         )
 
+@app.timer_trigger(schedule="0 */10 * * * *", arg_name="myTimer", run_on_startup=False, use_monitor=False)
+def uploadHudsonStationDetails(myTimer: func.TimerRequest) -> None:
+    """Timer Trigger that uploads the sfas_station2.js file to Azure Blob Storage"""
+    logging.info('uploadHudsonStationDetails Timer Trigger Function executed')
+
+    try:
+        CONNECTION_STRING = os.getenv("CONTAINER_CONNECTION_STRING")
+
+        if not CONNECTION_STRING:
+            raise ValueError("CONTAINER_CONNECTION_STRING environment variable is not set.")
+
+        response = requests.get("http://hudson.dl.stevens-tech.edu/sfas/sfas_stations2.js", timeout=30)
+        response.raise_for_status()
+
+        blob_service_client = BlobServiceClient.from_connection_string(CONNECTION_STRING)
+        container_client = blob_service_client.get_container_client("sfasjs")
+
+        blob_client = container_client.get_blob_client("sfas_stations2.js")
+
+        blob_client.upload_blob(
+            response.content,
+            overwrite=True,
+            content_settings=ContentSettings(
+                content_type="application/javascript",
+                cache_control="public,max-age=600"
+            )
+        )        
+    
+    except Exception as e:
+        logging.error(f"Unexpected error in uploadHudsonStationDetails: {e}")
+
+
 #NOTE: No longer used since the geojson data is now in blob storage
 #@app.route(route="flood-map/{level}", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 #@app.sql_input(arg_name="flood_data_rows", command_text="SELECT polygon_id, flood_level, dt, flooded, depth_class, depth_min, depth_max, area_sq_km, [geometry].STAsText() AS wkt FROM dbo.flood_map_data WHERE flood_level = @level", connection_string_setting="SqlConnectionString", parameters="@level={level}")
@@ -346,32 +378,32 @@ def getStationDataTimeSeries(
 #            mimetype="application/json"
 #        )
     
-
-@app.route(route="station-details", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
-def getHudsonStationDetails(req: func.HttpRequest) -> func.HttpResponse:
-    """HTTP trigger function to get the Hudson server JS file."""
-    logging.info('getStationDetails HTTP trigger function called.')
-    
-    try:
-        response = requests.get("http://hudson.dl.stevens-tech.edu/sfas/sfas_stations2.js", timeout=30)
-        response.raise_for_status()
-        
-        return func.HttpResponse(
-            response.text,
-            status_code=200,
-            mimetype="application/javascript"
-        )
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching station details: {e}")
-        return func.HttpResponse(
-            "/* Error fetching station data */",
-            status_code=500,
-            mimetype="application/javascript"
-        )
-    except Exception as e:
-        logging.error(f"Unexpected error in getStationDetails: {e}")
-        return func.HttpResponse(
-            "/* Internal server error */",
-            status_code=500,
-            mimetype="application/javascript"
-        )
+#NOTE: won't be used anymore due to station js file being in blob storage
+#@app.route(route="station-details", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+#def getHudsonStationDetails(req: func.HttpRequest) -> func.HttpResponse:
+#    """HTTP trigger function to get the Hudson server JS file."""
+#    logging.info('getStationDetails HTTP trigger function called.')
+#    
+#    try:
+#        response = requests.get("http://hudson.dl.stevens-tech.edu/sfas/sfas_stations2.js", timeout=30)
+#        response.raise_for_status()
+#        
+#        return func.HttpResponse(
+#            response.text,
+#            status_code=200,
+#            mimetype="application/javascript"
+#        )
+#    except requests.exceptions.RequestException as e:
+#        logging.error(f"Error fetching station details: {e}")
+#        return func.HttpResponse(
+#            "/* Error fetching station data */",
+#            status_code=500,
+#            mimetype="application/javascript"
+#        )
+#    except Exception as e:
+#        logging.error(f"Unexpected error in getStationDetails: {e}")
+#        return func.HttpResponse(
+#            "/* Internal server error */",
+#            status_code=500,
+#            mimetype="application/javascript"
+#        )
