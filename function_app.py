@@ -1,6 +1,7 @@
 import logging
 import json
 import azure.functions as func
+import pandas as pd
 import requests
 from noaa_coops import Station
 from datetime import datetime, timedelta, timezone
@@ -121,6 +122,9 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
                 # Reset the index (because the time column is the index for whatever reason)
                 df.reset_index(inplace=True)
 
+                # Needed because the time in the dataframe is not set to UTC
+                df["t"] = pd.to_datetime(df["t"], utc=True)
+
                 # Convert dataframe to JSON
                 records = json.loads(df.to_json(orient="records", date_format="iso"))
 
@@ -193,6 +197,8 @@ def fetchObservationData(myTimer: func.TimerRequest, station_list: func.SqlRowLi
 
                 # Convert value into meters
                 df["value"] = df["value"] * 0.3048
+
+                df["time"] = pd.to_datetime(df["time"], utc=True)
 
                 # Convert dataframe to JSON
                 records = json.loads(df.to_json(orient="records", date_format="iso"))
