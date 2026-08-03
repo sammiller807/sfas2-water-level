@@ -328,7 +328,7 @@ def getStationDataTimeSeries(
             mimetype="application/json"
         )
 
-@app.timer_trigger(schedule="0 */10 * * * *", arg_name="myTimer", run_on_startup=False, use_monitor=False)
+@app.timer_trigger(schedule="0 */11 * * * *", arg_name="myTimer", run_on_startup=False, use_monitor=False)
 def uploadHudsonStationDetails(myTimer: func.TimerRequest) -> None:
     """Timer Trigger that uploads the sfas_station2.js file to Azure Blob Storage"""
     logging.info('uploadHudsonStationDetails Timer Trigger Function executed')
